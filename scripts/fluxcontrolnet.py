@@ -12,25 +12,45 @@ from functools import partial
 import numpy as np
 from controlnet_aux import CannyDetector
 from controlnet_aux.processor import Processor
-#from image_gen_aux import DepthPreprocessor
 import os
 from modules import script_callbacks
 from modules.ui_components import ToolButton
 import modules.generation_parameters_copypaste as parameters_copypaste
-#import modules.scripts as scripts
 from modules.shared import opts, OptionInfo
-#from modules import script_callbacks
-#from modules.ui_components import ToolButton
 from modules.ui_common import save_files
 from huggingface_hub import hf_hub_download
 import random
 from datetime import datetime 
 from collections import deque
-#from modules_forge.forge_canvas.canvas import ForgeCanvas, canvas_head
-#from importlib import reload
 from huggingface_hub import login
 
-# Inicia sesión con tu token
+def load_huggingface_token():
+    try:
+        # Obtener el directorio raíz de ForgeWebUI
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        token_path = os.path.join(root_dir, "huggingface_access_token.txt")
+        
+        if not os.path.exists(token_path):
+            raise FileNotFoundError(f"Token file not found at {token_path}")
+        
+        with open(token_path, 'r') as file:
+            token = file.read().strip()
+            if not token:
+                raise ValueError("Token file is empty")
+            return token
+    except Exception as e:
+        print(f"Error loading Hugging Face token: {str(e)}")
+        return None
+
+# Initialize Hugging Face login
+try:
+    token = load_huggingface_token()
+    if token:
+        login(token)
+    else:
+        print("Failed to load Hugging Face token. Some features may not be available.")
+except Exception as e:
+    print(f"Error during Hugging Face login: {str(e)}")
 
  
 # ["canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", "lineart_anime",
@@ -203,8 +223,8 @@ class FluxControlNetTab:
             elif self.current_processor == "redux":
                 control_image = control_image
             
-            os.makedirs("extensions/sd-forge-fluxcontrolnet/maps", exist_ok=True)
-            control_image.save("extensions/sd-forge-fluxcontrolnet/maps/controlmap.png")
+            #os.makedirs("extensions/sd-forge-fluxcontrolnet/maps", exist_ok=True)
+            #control_image.save("extensions/sd-forge-fluxcontrolnet/maps/controlmap.png")
             
             control_image_np = np.array(control_image)
             
@@ -809,4 +829,5 @@ def on_ui_tabs():
     return [(flux_interface, "Flux.1 ControlNet", "flux_controlnet_tab")]
 
 # Register the tab
+script_callbacks.on_ui_tabs(on_ui_tabs)        
 script_callbacks.on_ui_tabs(on_ui_tabs)        
