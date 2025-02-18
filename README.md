@@ -10,8 +10,10 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 
 ## Supports
 ✅ CUDA GPUs (tested with GPUs of 12GB VRAM, should work with 8GB VRAM).
+
 ❌ LoRa
 
+## Requierements
 > [!WARNING]  
 > Easiest way to ensure necessary diffusers release is installed is to edit requirements_versions.txt in the webUI directory.
 > 
@@ -24,12 +26,13 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > 
 > Forge2 already has newer versions for all but diffusers. Be aware that updates to Forge2 may overwrite the requirements file.
 
+## Set HF Access Token
 > [!IMPORTANT] 
 >
 > Also needs a huggingface access token: Sign up / log in, go to your profile, create an access token. Read type is all you need, avoid the much more complicated Fine-grained option. Copy the token. Make a textfile called huggingface_access_token.txt in the main webui folder, e.g. {forge install directory}\webui, and paste the token in there. You will also need to accept the terms on the Flux1 Dev repositories pages.
 
 
-
+## Downloads
 > [!NOTE]  
 > Download checkpoints and move to folder models/stable-diffusion
 >
