@@ -1,7 +1,7 @@
 # sd-forge-fluxcontrolnet
 This is an implementation to use Flux1.dev ControlNet Forge WebUI Extension by [@AcademiaSD](https://github.com/AcademiaSD?tab=repositories)
 
-For Spanish tutorials you can see our channel on https://www.youtube.com/@Academia_SD
+For Spanish viedo tutorials (English IA Dub and English Subtitles) you can see our channel on https://www.youtube.com/@Academia_SD
 
 ![image](https://github.com/user-attachments/assets/7a2bd67d-d8d6-4fd4-bcf6-88a56c80dd38)
 
