@@ -31,7 +31,7 @@ from collections import deque
 from huggingface_hub import login
 
 # Inicia sesión con tu token
-login("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")  # Reemplaza con tu token
+
  
 # ["canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", "lineart_anime",
 #  "lineart_coarse", "lineart_realistic", "mediapipe_face", "mlsd", "normal_bae", "normal_midas",
