@@ -8,6 +8,10 @@ For Spanish tutorials you can see our channel on https://www.youtube.com/@Academ
 ## Install
 Go to the Extensions tab > Install from URL > URL for this repository.
 
+## Supports
+✅ CUDA GPUs (tested with GPUs of 12GB VRAM, should work with 8GB VRAM).
+❌ LoRa
+
 > [!WARNING]  
 > Easiest way to ensure necessary diffusers release is installed is to edit requirements_versions.txt in the webUI directory.
 > 
