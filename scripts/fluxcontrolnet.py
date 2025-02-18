@@ -80,7 +80,7 @@ def print_memory_usage(message="", debug_enabled=False):
 
 def quantize_model_to_nf4(model, name="", debug_enabled=False):
     debug_print(f"\nCuantizando modelo {name} a NF4...", debug_enabled)
-    print_memory_usage("Antes de cuantizacion:", debug_enabled)
+    #print_memory_usage("Antes de cuantizacion:", debug_enabled)
     
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
@@ -110,7 +110,7 @@ def quantize_model_to_nf4(model, name="", debug_enabled=False):
             else:
                 setattr(model, child_name, new_module)
     
-    print_memory_usage("Despues de cuantizacion:", debug_enabled)
+    #print_memory_usage("Despues de cuantizacion:", debug_enabled)
     return model
 
 def clear_memory(debug_enabled=False):
@@ -119,7 +119,7 @@ def clear_memory(debug_enabled=False):
         print_memory_usage("Antes de limpiar:", debug_enabled)
         torch.cuda.empty_cache()
         gc.collect()
-        print_memory_usage("Despues de limpiar:", debug_enabled)
+        #print_memory_usage("Despues de limpiar:", debug_enabled)
 
 def update_dimensions(image, width_slider, height_slider):
     if image is not None:
@@ -133,7 +133,9 @@ class LogManager:
         self.log_box = None
 
     def log(self, message):
-        print(message)  # Mantener el print original en consola
+        if isinstance(message, tuple):
+            message = " ".join(str(m) for m in message)
+        # print(message)  # Mantener el print original en consola
         self.messages.append(str(message))
         if self.log_box is not None:
             return "\n".join(self.messages)
@@ -178,7 +180,7 @@ class FluxControlNetTab:
             self.pipe = None
             clear_memory()
     
-        print(f"Processor changed to: {processor_type}")
+        #debug_print("\nProcessor changed to: {processor_type}", debug_enabled)
         
         return [
             gr.Button.update(variant="secondary" if processor_type == "canny" else "primary"),
@@ -233,7 +235,7 @@ class FluxControlNetTab:
             
         except Exception as e:
             self.logger.log(f"\nError en el preprocesamiento: {str(e)}")
-            self.logger.log("Stacktrace:", traceback.format_exc())
+            self.logger.log(f"Stacktrace:\n{traceback.format_exc()}")
             return None
 
     def load_models(self, debug_enabled=False):
@@ -295,13 +297,13 @@ class FluxControlNetTab:
    
             pipe = FluxPipeline.from_single_file(
                 base_model,
-                text_encoder=None,
-                text_encoder_2=None,
-                tokenizer=None,
-                tokenizer_2=None,
+                text_encoder=text_encoder,
+                text_encoder_2=text_encoder_2,
+                tokenizer=tokenizer,
+                tokenizer_2=tokenizer_2,
                 vae=vae,
                 torch_dtype=dtype    
-            ).to("cuda")
+            )#.to("cuda")
         
             # test lora
             pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
@@ -331,17 +333,15 @@ class FluxControlNetTab:
     def load_control_image(self, input_image):
         if input_image is not None:
             return Image.fromarray(input_image.astype('uint8'))
-        return load_image("./models/diffusers/cn")
+        return load_image("./models/diffusers/cn/default.png")
 
     def generate(
         self, prompt, input_image, width, height, steps, guidance, 
         low_threshold, high_threshold, detect_resolution, image_resolution, 
         reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
         prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1, 
-        pooled_prompt_embeds_scale_2, text_encoder, text_encoder_2, tokenizer, 
-        tokenizer_2, debug_enabled,
-        
-        ):
+        pooled_prompt_embeds_scale_2, text_encoder=None, text_encoder_2=None, 
+        tokenizer=None, tokenizer_2=None, debug_enabled=False):
         try:
             self.logger.log(f"Seed value: {seed}")
             self.logger.log(f"Prompt value: {prompt}")
@@ -351,7 +351,7 @@ class FluxControlNetTab:
             self.logger.log(f"Prompt_embeds_scale value: {prompt_embeds_scale_1}")
             
             debug_print("\nIniciando generacion de imagen...", debug_enabled)
-            print_memory_usage("Memoria inicial:", debug_enabled)
+            #print_memory_usage("Memoria inicial:", debug_enabled)
             
             if self.pipe is None:
                 debug_print("Cargando modelos por primera vez...", debug_enabled)
@@ -545,7 +545,7 @@ def on_ui_tabs():
             steps = gr.Slider(label="Inference_Steps :", minimum=1, maximum=100, value=30, step=1)
             guidance = gr.Slider(label="Guidance_Scale:", minimum=1, maximum=100, value=30, step=0.1)
             with gr.Row():
-                seed = gr.Slider(label="Seed noise:", minimum=0, maximum=9999999999, value=0, step=1)
+                seed = gr.Slider(label="Seed :", minimum=0, maximum=9999999999, value=0, step=1)
                 randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
         
         
@@ -571,8 +571,8 @@ def on_ui_tabs():
                 visible=False
             )
             prompt_embeds_scale_1 = gr.Slider(
-                label="prompt embeds scale 1st image",
-                info="info sobre esto",
+                label="Prompt embeds scale 1st image",
+                info=" ",
                 minimum=0,
                 maximum=1.5,
                 step=0.01,
@@ -580,8 +580,8 @@ def on_ui_tabs():
                 visible=False
             )
             prompt_embeds_scale_2 = gr.Slider(
-                label="prompt embeds scale 2nd image",
-                info="info sobre esto",
+                label="Prompt embeds scale 2nd image",
+                info=" ",
                 minimum=0,
                 maximum=1.5,
                 step=0.01,
@@ -589,8 +589,8 @@ def on_ui_tabs():
                 visible=False
             )
             pooled_prompt_embeds_scale_1 = gr.Slider(
-                label="pooled prompt embeds scale 1nd image",
-                info="info sobre esto",
+                label="Pooled prompt embeds scale 1nd image",
+                info=" ",
                 minimum=0,
                 maximum=1.5,
                 step=0.01,
@@ -598,8 +598,8 @@ def on_ui_tabs():
                 visible=False
             )
             pooled_prompt_embeds_scale_2 = gr.Slider(
-                label="pooled prompt embeds scale 2nd image",
-                info="info sobre esto",
+                label="Pooled prompt embeds scale 2nd image:",
+                info=" ",
                 minimum=0,
                 maximum=1.5,
                 step=0.01,
@@ -750,15 +750,40 @@ def on_ui_tabs():
             """Función que se ejecuta después de la generación"""
             return result, gr.Button.update(value="Generate", variant="primary", interactive=True)
 
-        def generate_with_state(*args):
+        def generate_with_state(
+            prompt, input_image, width, height, steps, guidance,
+            low_threshold, high_threshold, detect_resolution, image_resolution,
+            reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
+            prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
+            pooled_prompt_embeds_scale_2, text_encoder, text_encoder_2, tokenizer, tokenizer_2
+        ):
             try:
                 result = flux_tab.generate(
-                    *args,
+                    prompt=prompt,
+                    input_image=input_image,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    guidance=guidance,
+                    low_threshold=low_threshold,
+                    high_threshold=high_threshold,
+                    detect_resolution=detect_resolution,
+                    image_resolution=image_resolution,
+                    reference_image=reference_image,
+                    debug=debug,
+                    processor_id=processor_id,
+                    seed=seed,
+                    randomize_seed=randomize_seed,
+                    reference_scale=reference_scale,
+                    prompt_embeds_scale_1=prompt_embeds_scale_1,
+                    prompt_embeds_scale_2=prompt_embeds_scale_2,
+                    pooled_prompt_embeds_scale_1=pooled_prompt_embeds_scale_1,
+                    pooled_prompt_embeds_scale_2=pooled_prompt_embeds_scale_2,
                     text_encoder=None,
                     text_encoder_2=None,
                     tokenizer=None,
                     tokenizer_2=None,
-                    debug_enabled=args[11]
+                    debug_enabled=debug
                 )
                 log_text = flux_tab.logger.log("Generation completed")
                 return result, log_text
@@ -829,5 +854,4 @@ def on_ui_tabs():
     return [(flux_interface, "Flux.1 ControlNet", "flux_controlnet_tab")]
 
 # Register the tab
-script_callbacks.on_ui_tabs(on_ui_tabs)        
 script_callbacks.on_ui_tabs(on_ui_tabs)        
