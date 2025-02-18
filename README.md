@@ -35,4 +35,3 @@ https://drive.google.com/file/d/1li5UP3oKQWbdYHakOs4jvH94tuFQpPh2/view?usp=shari
 
 Unzip to models/diffusers keeping the cn folder
 
-almost current UI screenshot
