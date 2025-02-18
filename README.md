@@ -7,12 +7,12 @@ Go to the Extensions tab, then Install from URL, use the URL for this repository
 
 Easiest way to ensure necessary diffusers release is installed is to edit requirements_versions.txt in the webUI directory.
 
-diffusers>=0.32.2
-transformers>=4.48.3
-Pillow>=9.5.0
-tokenizers>=0.21
-huggingface-hub>=0.28.1
-controlnet-aux>=0.0.9
+diffusers>=0.32.2,
+transformers>=4.48.3,
+Pillow>=9.5.0,
+tokenizers>=0.21,
+huggingface-hub>=0.28.1,
+controlnet-aux>=0.0.9,
 
 Forge2 already has newer versions for all but diffusers. Be aware that updates to Forge2 may overwrite the requirements file.
 
