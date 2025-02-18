@@ -18,7 +18,7 @@ Forge2 already has newer versions for all but diffusers. Be aware that updates t
 
 Important
 
-Also needs a huggingface access token: Sign up / log in, go to your profile, create an access token. Read type is all you need, avoid the much more complicated Fine-grained option. Copy the token. Make a textfile called huggingface_access_token.txt in the main webui folder, e.g. {forge install directory}\webui, and paste the token in there. You will also need to accept the terms on the SD3 repository page.
+Also needs a huggingface access token: Sign up / log in, go to your profile, create an access token. Read type is all you need, avoid the much more complicated Fine-grained option. Copy the token. Make a textfile called huggingface_access_token.txt in the main webui folder, e.g. {forge install directory}\webui, and paste the token in there. You will also need to accept the terms on the Flux1 Dev repositories pages.
 
 Note
 
