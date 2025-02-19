@@ -1,5 +1,5 @@
 # sd-forge-fluxcontrolnet
-This is an implementation to use Flux1.dev ControlNet Forge WebUI Extension by [@AcademiaSD](https://github.com/AcademiaSD?tab=repositories)
+This is an implementation to use Canny, Depth, and Redux Flux1.dev ControlNet Forge WebUI Extension by [@AcademiaSD](https://github.com/AcademiaSD?tab=repositories)
 
 ## For Forge WebUI and ComfyUI tutorials
 You can follow and see Spanish videos tutorials (English IA Dub and English Subtitles) on https://www.youtube.com/@Academia_SD
