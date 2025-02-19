@@ -45,5 +45,3 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 >
 > - For Depth
 > https://civitai.com/models/1264100/flux1-depth-dev-fp8
-
-
