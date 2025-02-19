@@ -45,7 +45,5 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 >
 > - For Depth
 > https://civitai.com/models/1264100/flux1-depth-dev-fp8
->
-> - Text Encoders models download:
-> https://drive.google.com/file/d/1li5UP3oKQWbdYHakOs4jvH94tuFQpPh2/view?usp=sharing (Unzip to models/diffusers keeping the cn folder)
+
 
