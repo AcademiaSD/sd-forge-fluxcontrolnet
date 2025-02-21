@@ -24,19 +24,18 @@ from datetime import datetime
 from collections import deque
 from huggingface_hub import login
 import threading
-import time
+import json
+import os
 
-#Academia-SD/flux1-dev-text_encoders-NF4
 
+# Academia-SD/flux1-dev-text_encoders-NF4
 def load_huggingface_token():
     try:
         # Obtener el directorio raíz de ForgeWebUI
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         token_path = os.path.join(root_dir, "huggingface_access_token.txt")
-        
         if not os.path.exists(token_path):
             raise FileNotFoundError(f"Token file not found at {token_path}")
-        
         with open(token_path, 'r') as file:
             token = file.read().strip()
             if not token:
@@ -45,7 +44,6 @@ def load_huggingface_token():
     except Exception as e:
         print(f"Error loading Hugging Face token: {str(e)}")
         return None
-
 # Initialize Hugging Face login
 try:
     token = load_huggingface_token()
@@ -55,40 +53,30 @@ try:
         print("Failed to load Hugging Face token. Some features may not be available.")
 except Exception as e:
     print(f"Error during Hugging Face login: {str(e)}")
-
- 
-# ["canny", "depth_leres", "depth_leres++", "depth_midas", "depth_zoe", "lineart_anime",
-#  "lineart_coarse", "lineart_realistic", "mediapipe_face", "mlsd", "normal_bae", "normal_midas",
-#  "openpose", "openpose_face", "openpose_faceonly", "openpose_full", "openpose_hand",
-#  "scribble_hed, "scribble_pidinet", "shuffle", "softedge_hed", "softedge_hedsafe",
-#  "softedge_pidinet", "softedge_pidsafe", "dwpose"]
 processor_id = 'canny'
-#processor = Processor(processor_id)
 menupro = "canny"
-
-
 prompt_embeds_scale_1 = 1.0
 prompt_embeds_scale_2 = 1.0
 pooled_prompt_embeds_scale_1 = 1.0
 pooled_prompt_embeds_scale_2 = 1.0
+checkpoint_path = "./models/Stable-diffusion/"
+current_model = "flux1-Canny-Dev_FP8.safetensors"
 
 def debug_print(message, debug_enabled=False):
     if debug_enabled:
-        self.logger.log(message)
+        print(message)
 
 def print_memory_usage(message="", debug_enabled=False):
     if debug_enabled and torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
         reserved = torch.cuda.memory_reserved() / 1024**2
-        self.logger.log(f"{message} GPU Memory: {allocated:.2f}MB allocated, {reserved:.2f}MB reserved")
+        print(f"{message} GPU Memory: {allocated:.2f}MB allocated, {reserved:.2f}MB reserved")
 
 def quantize_model_to_nf4(model, name="", debug_enabled=False):
-    debug_print(f"\nCuantizando modelo {name} a NF4...", debug_enabled)
-    #print_memory_usage("Antes de cuantizacion:", debug_enabled)
-    
+    debug_print(f"\nQuantizing model {name} t...", debug_enabled)
     for name, module in model.named_modules():
         if isinstance(module, torch.nn.Linear):
-            debug_print(f"Convirtiendo capa: {name}", debug_enabled)
+            debug_print(f"\Transforming layer: {name}", debug_enabled)
             new_module = bnb.nn.Linear4bit(
                 module.in_features,
                 module.out_features,
@@ -105,7 +93,6 @@ def quantize_model_to_nf4(model, name="", debug_enabled=False):
                 )
                 if module.bias is not None:
                     new_module.bias = torch.nn.Parameter(module.bias.data)
-            
             parent_name = '.'.join(name.split('.')[:-1])
             child_name = name.split('.')[-1]
             if parent_name:
@@ -113,17 +100,14 @@ def quantize_model_to_nf4(model, name="", debug_enabled=False):
                 setattr(parent, child_name, new_module)
             else:
                 setattr(model, child_name, new_module)
-    
-    #print_memory_usage("Despues de cuantizacion:", debug_enabled)
     return model
 
 def clear_memory(debug_enabled=False):
-    debug_print("\nLimpiando memoria...", debug_enabled)
+    debug_print("\nEmptying memory", debug_enabled)
     if torch.cuda.is_available():
-        print_memory_usage("Antes de limpiar:", debug_enabled)
+        print_memory_usage("Before cleaning:", debug_enabled)
         torch.cuda.empty_cache()
         gc.collect()
-        #print_memory_usage("Despues de limpiar:", debug_enabled)
 
 def update_dimensions(image, width_slider, height_slider):
     if image is not None:
@@ -139,26 +123,99 @@ class LogManager:
     def log(self, message):
         if isinstance(message, tuple):
             message = " ".join(str(m) for m in message)
-        # print(message)  # Mantener el print original en consola
+        print(message)
         self.messages.append(str(message))
         if self.log_box is not None:
             return "\n".join(self.messages)
         return None
+        
+def load_settings():
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        extension_dir = os.path.join(root_dir, "extensions", "sd-forge-fluxcontrolnet", "utils")
+        config_path = os.path.join(extension_dir, "extension_config.txt")
+        
+        # Valores por defecto
+        settings = {
+            "checkpoint_path": "./models/Stable-diffusion/",
+            "output_dir": "./outputs/fluxcontrolnet/"
+        }
+        
+        if os.path.exists(config_path):
+            print("encuentra ")
+            #print(f"Encuentra {new_path}")
+            with open(config_path, 'r') as f:
+                loaded_settings = json.load(f)
+                print("Configuración cargada:", loaded_settings)
+                # Asegurar compatibilidad con claves correctas
+                settings.update(loaded_settings)
+        
+        return settings
+        
+        
+    except Exception as e:
+        print(f"Error loading settings: {str(e)}")
+        return None
+        
+
+def save_settingsHF(hf_token_value):
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        token_path = os.path.join(root_dir, "huggingface_access_token.txt")
+        with open(token_path, 'w') as f:
+            f.write(hf_token_value)
+        return f"HF Token saved"
+    except Exception as e:
+        return f"Error saving HF Token: {str(e)}"
+
+def save_settings(checkpoints_path, output_dir, debug_enabled=False):
+    try:
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        extension_dir = os.path.join(root_dir, "extensions", "sd-forge-fluxcontrolnet", "utils")
+        os.makedirs(extension_dir, exist_ok=True)
+        config_path = os.path.join(extension_dir, "extension_config.txt")
+        config = {
+            "checkpoint_path": checkpoints_path,  # Clave corregida
+            "output_dir": output_dir
+        }
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=4)
+        log_message = "Settings file saved"
+        # Return all three expected values: log message and both path values
+        return log_message, checkpoints_path, output_dir
+    except Exception as e:
+        error_message = f"Error saving settings file: {str(e)}"
+        # In case of error, still return all three expected values
+        return error_message, checkpoints_path, output_dir
         
 class FluxControlNetTab:
     def __init__(self):
         self.pipe = None
         self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4"
         self.current_processor = "canny"
-        self.current_model = "flux1CannyDevFp8_v10.safetensors"
+        self.current_model = "flux1-Canny-Dev_FP8.safetensors"
+        self.checkpoint_path = "./models/Stable-diffusion/"
+        self.output_dir = "./outputs/fluxcontrolnet/"
+        
         self.default_processor_id = "depth_zoe"
-        self.logger = LogManager()  # Inicializar el logger aquí
+        self.logger = LogManager()
+        settings = load_settings()
+        if settings:
+            self.checkpoint_path = settings.get("checkpoint_path", "./models/Stable-diffusion/")
+            self.output_dir = settings.get("output_dir", "./outputs/fluxcontrolnet/")
+        else:
+            self.checkpoint_path = "./models/Stable-diffusion/"
+            self.output_dir = "./outputs/fluxcontrolnet/"
+            
+        
+            
+        print("self.output_dir", self.output_dir)
+        print("self.checkpoint_path", self.checkpoint_path)
 
     def update_model_path(self, new_path, debug_enabled):
         if new_path and os.path.exists(new_path):
             self.model_path = new_path
             debug_print(f"Updated model path: {new_path}", debug_enabled)
-            # Clear existing pipeline to force reload with new path
             if self.pipe is not None:
                 del self.pipe
                 self.pipe = None
@@ -168,15 +225,15 @@ class FluxControlNetTab:
     def update_processor_and_model(self, processor_type):
         if processor_type == "canny":
             self.current_processor = "canny"
-            self.current_model = "flux1CannyDevFp8_v10.safetensors"
+            self.current_model = "flux1-Canny-Dev_FP8.safetensors"
             self.default_processor_id = None
         elif processor_type == "depth":
             self.current_processor = "depth"
-            self.current_model = "flux1DepthDevFp8_v10.safetensors"
+            self.current_model = "flux1-Depth-Dev_FP8.safetensors"
             self.default_processor_id = "depth_zoe"
         elif processor_type == "redux":
             self.current_processor = "redux"
-            self.current_model = "flux1DevFp8_v10.safetensors"
+            self.current_model = "flux1-Dev_FP8.safetensors"
             self.default_processor_id = None
         
         if self.pipe is not None:
@@ -184,14 +241,11 @@ class FluxControlNetTab:
             self.pipe = None
             clear_memory()
     
-        #debug_print("\nProcessor changed to: {processor_type}", debug_enabled)
-        
         return [
             gr.Button.update(variant="secondary" if processor_type == "canny" else "primary"),
             gr.Button.update(variant="secondary" if processor_type == "depth" else "primary"),
             gr.Button.update(variant="secondary" if processor_type == "redux" else "primary")
         ]
-
 
     def get_processor(self):
         if self.current_processor == "canny":
@@ -200,92 +254,85 @@ class FluxControlNetTab:
             return
         elif self.current_processor == "redux":
             return 
-        return CannyDetector()  # Default to Canny
+        return # CannyDetector()  # Default to Canny
 
-    def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None):
+    def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None, control_image2=None):
         try:
-            debug_print("\nIniciando preprocesamiento...", debug_enabled)
-            
+            debug_print("\nStarting preprocessing...", debug_enabled)
             control_image = self.load_control_image(input_image)
-            
-            if self.current_processor == "canny":
-                processor = self.get_processor()
-                control_image = processor(
-                    control_image, 
-                    low_threshold=int(low_threshold),
-                    high_threshold=int(high_threshold),
-                    detect_resolution=int(detect_resolution),
-                    image_resolution=int(image_resolution)
-                )
-            
-            elif self.current_processor == "depth":
-                # Usar el processor_id del dropdown si está disponible, sino usar el default
-                actual_processor_id = processor_id if processor_id is not None else self.default_processor_id
-                processor = Processor(actual_processor_id)
-                control_image = processor(
-                    control_image,
-                )
-            
-            elif self.current_processor == "redux":
-                control_image = control_image
-            
-            #os.makedirs("extensions/sd-forge-fluxcontrolnet/maps", exist_ok=True)
-            #control_image.save("extensions/sd-forge-fluxcontrolnet/maps/controlmap.png")
-            
-            control_image_np = np.array(control_image)
-            
-            debug_print("\nPreprocesamiento completado", debug_enabled)
-            return control_image_np
-            
+            if self.current_processor in ["canny", "depth"]:
+                if self.current_processor == "canny":
+                    processor = self.get_processor()
+                    control_image = processor(
+                        control_image, 
+                        low_threshold=int(low_threshold),
+                        high_threshold=int(high_threshold),
+                        detect_resolution=int(detect_resolution),
+                        image_resolution=int(image_resolution)
+                    )
+                elif self.current_processor == "depth":
+                    actual_processor_id = processor_id if processor_id is not None else self.default_processor_id
+                    processor = Processor(actual_processor_id)
+                    control_image = processor(
+                        control_image,
+                    )
+                debug_print("\nPreprocess Done.", debug_enabled)
+                return np.array(control_image)
+            return None
         except Exception as e:
             self.logger.log(f"\nError en el preprocesamiento: {str(e)}")
             self.logger.log(f"Stacktrace:\n{traceback.format_exc()}")
             return None
 
-    def load_models(self, use_hyper_flux=True, debug_enabled=False):
+    def load_models(self, use_hyper_flux=True, debug_enabled=False):  #Text_encoders + vae
         debug_print("\nIniciando carga de modelos...", debug_enabled)
-        
         dtype = torch.bfloat16
         
         debug_print("\nCargando CLIP text encoder...", debug_enabled)
         text_encoder = CLIPTextModel.from_pretrained(
             self.model_path, subfolder="text_encoder", torch_dtype=dtype
         )
-        #text_encoder = quantize_model_to_nf4(text_encoder, "CLIP text encoder", debug_enabled)
         
         debug_print("\nCargando T5 text encoder...", debug_enabled)
         text_encoder_2 = T5EncoderModel.from_pretrained(
             self.model_path, subfolder="text_encoder_2", torch_dtype=dtype
         )
-        #text_encoder_2 = quantize_model_to_nf4(text_encoder_2, "T5 text encoder", debug_enabled)
         
         debug_print("\nCargando VAE...", debug_enabled)
         vae = AutoencoderKL.from_pretrained(
             self.model_path, subfolder="vae", torch_dtype=dtype
-            #"./models/", subfolder="vae", torch_dtype=dtype
         )
       
-        #vae = quantize_model_to_nf4(vae, "VAE", debug_enabled)
-        
         debug_print("\nCargando tokenizers...", debug_enabled)
         tokenizer = CLIPTokenizer.from_pretrained(self.model_path, subfolder="tokenizer")
         tokenizer_2 = T5Tokenizer.from_pretrained(self.model_path, subfolder="tokenizer_2")
         
-        #debug_print("\nCargando scheduler...", debug_enabled)
-        #scheduler = TrainingArguments.from_pretrained(self.model_path, subfolder="scheduler")
-        
         clear_memory(debug_enabled)
         
-        debug_print("\nCargando modelo principal Flux ControlNet...", debug_enabled)
+        debug_print("\nLoading main Flux ControlNet Checkpoint...", debug_enabled)  #wip cambiar la ruta escrita por la ruta variable
         
         if self.current_processor == "canny":
-            base_model = os.path.join("./models/Stable-diffusion/flux1CannyDevFp8_v10.safetensors") #aqui
+            self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
+            self.current_model = self.current_model or "flux1-Canny-Dev_FP8.safetensors"
+            base_model = os.path.join(self.checkpoint_path, self.current_model)
         if self.current_processor == "depth":
-            base_model = os.path.join("./models/Stable-diffusion/flux1DepthDevFp8_v10.safetensors") #aqui
+            self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
+            self.current_model = self.current_model or "flux1-Depth-Dev_FP8.safetensors"
+            base_model = os.path.join(self.checkpoint_path, self.current_model)
         if self.current_processor == "redux":
-            base_model = os.path.join("./models/Stable-diffusion/flux1DevFp8_v10.safetensors") #aqui
+            self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
+            self.current_model = self.current_model or "flux1-Dev_FP8.safetensors"
+            base_model = os.path.join(self.checkpoint_path, self.current_model)
+           
+        #debug_print("\nCargando modelo principal Flux ControlNet...", debug_enabled)
+        #if self.current_processor == "canny":
+        #    base_model = os.path.join("./models/Stable-diffusion/flux1-Canny-Dev_FP8.safetensors")
+        #if self.current_processor == "depth":
+        #    base_model = os.path.join("./models/Stable-diffusion/flux1-Depth-Dev_FP8.safetensors")
+        #if self.current_processor == "redux":
+        #    base_model = os.path.join("./models/Stable-diffusion/flux1-Dev_FP8.safetensors")
         
-        if self.current_processor == "canny" or self.current_processor == "depth":
+        if self.current_processor in ["canny", "depth"]:
             pipe = FluxControlPipeline.from_single_file(
                 base_model,
                 text_encoder=text_encoder,
@@ -295,10 +342,10 @@ class FluxControlNetTab:
                 vae=vae,
                 torch_dtype=dtype
             )
-            
+            if use_hyper_flux:
+                pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
+                pipe.fuse_lora(lora_scale=0.125)
         if self.current_processor == "redux":
-        
-   
             pipe = FluxPipeline.from_single_file(
                 base_model,
                 text_encoder=text_encoder,
@@ -307,14 +354,10 @@ class FluxControlNetTab:
                 tokenizer_2=tokenizer_2,
                 vae=vae,
                 torch_dtype=dtype    
-            )#.to("cuda")
-        
-            # test lora
+            )
             if use_hyper_flux:
                 pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
                 pipe.fuse_lora(lora_scale=0.125)
-            #pipe.to(torch_dtype=dtype )
-        
         
         debug_print("\nCuantizando transformer principal...", debug_enabled)
         pipe.transformer = quantize_model_to_nf4(pipe.transformer, "Transformer principal", debug_enabled)
@@ -332,70 +375,43 @@ class FluxControlNetTab:
         
         clear_memory(debug_enabled)
         debug_print("\nModelos cargados y optimizados correctamente", debug_enabled)
-
         return pipe
 
     def load_control_image(self, input_image):
         try:
             if input_image is not None:
-                
-                # Verify input_image is valid
                 if not isinstance(input_image, np.ndarray):
                     raise ValueError("Invalid input image format")
-                
-                # Check if image array is empty or corrupted
                 if input_image.size == 0 or input_image.shape[0] == 0 or input_image.shape[1] == 0:
                     raise ValueError("Empty or corrupted input image")
-                    
-                # Convert to PIL Image with error handling
                 image = Image.fromarray(input_image.astype('uint8'))
-                
-                # Verify the image was created successfully
                 if not isinstance(image, Image.Image):
                     raise ValueError("Failed to create PIL Image")
-                    
                 return image
-                
-            # If no input image, load default with verification
-            default_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png"
+            #default_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png"
             if not os.path.exists(default_path):
                 raise FileNotFoundError(f"Default image not found at {default_path}")
-                
             return load_image(default_path)
-            
         except Exception as e:
             self.logger.log(f"Error loading control image: {str(e)}")
-            # Return a valid but empty image as fallback
             return Image.new('RGB', (512, 512), color='white')
-
 
     def generate(
         self, prompt, input_image, width, height, steps, guidance, 
         low_threshold, high_threshold, detect_resolution, image_resolution, 
         reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
         prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1, 
-        pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2=None, text_encoder=None, text_encoder_2=None, 
-        tokenizer=None, tokenizer_2=None, debug_enabled=False):
+        pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, text_encoder, text_encoder_2, 
+        tokenizer, tokenizer_2, debug_enabled, output_dir):
         try:
-            self.logger.log(f"Seed value: {seed}")
-            self.logger.log(f"Prompt value: {prompt}")
-            self.logger.log(f"Reference_scale value: {reference_scale}")
-            self.logger.log(f"Steps value: {steps}")
-            self.logger.log(f"Guide value: {guidance}")
-            self.logger.log(f"Prompt_embeds_scale value: {prompt_embeds_scale_1}")
-            
-            debug_print("\nIniciando generacion de imagen...", debug_enabled)
-            #print_memory_usage("Memoria inicial:", debug_enabled)
+            debug_print("\nStarting inference...", debug_enabled)
             
             if self.pipe is None:
-                debug_print("Cargando modelos por primera vez...", debug_enabled)
+                debug_print("Loading models for the first time...", debug_enabled)
                 self.pipe = self.load_models(use_hyper_flux=use_hyper_flux, debug_enabled=debug_enabled)
             
             control_image = self.load_control_image(input_image)
-            
-            
             if self.current_processor == "canny":
-                #actualprocessor = "canny"
                 menupro = "canny"
                 processor = self.get_processor()
                 control_image = processor(
@@ -405,33 +421,20 @@ class FluxControlNetTab:
                     detect_resolution=int(detect_resolution),
                     image_resolution=int(image_resolution)
                 )
-            
-            #preprocesador de generacion
             if self.current_processor == "depth":
                 menupro = "depth"
-                #actualprocessor = "depth"
                 processor_id = 'depth_zoe'
                 processor = Processor(processor_id)
                 control_image = processor(
                     control_image, 
-                    
                 )
-
             if self.current_processor == "redux":
-                #actualprocessor = "canny"
-                #processor = self.get_processor()
                 control_image = control_image 
-                    #low_threshold=int(low_threshold),
-          
-            #control_image.save("./extensions/sd-forge-fluxcontrolnet/maps/controlmap.png")
-            
-            #debug_print("\nImagen de control cargada", debug_enabled)
+                control_image2 = control_image2
             
             if randomize_seed:
                 seed = random.randint(0, 999999999)
-            
-            # Ensure seed is an integer
-            seed_value = int(seed) if seed is not None else 1234
+            seed_value = int(seed) if seed is not None else 0
             
             debug_print(f"\nGenerando con parametros:", debug_enabled)
             debug_print(f"Width: {width}", debug_enabled)
@@ -445,9 +448,7 @@ class FluxControlNetTab:
             debug_print(f"Seed: {seed_value}", debug_enabled)
             debug_print(f"Prompt: {prompt}", debug_enabled)
             
-            #render
-            
-            if self.current_processor == "canny" or self.current_processor == "depth":
+            if self.current_processor == "canny":
                 with torch.inference_mode():
                     result = self.pipe(
                         prompt=prompt,
@@ -458,12 +459,22 @@ class FluxControlNetTab:
                         guidance_scale=guidance,
                         generator=torch.Generator("cpu").manual_seed(seed_value),
                     )
-                
+            if self.current_processor == "depth":
+                with torch.inference_mode():
+                    result = self.pipe(
+                        prompt=prompt,
+                        control_image=control_image,
+                        height=height,
+                        width=width,
+                        num_inference_steps=int(steps),
+                        guidance_scale=guidance,
+                        generator=torch.Generator("cpu").manual_seed(seed_value),
+                    )
+            
+                    
             if self.current_processor == "redux":
-                #pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained("black-forest-labs/FLUX.1-Redux-dev", torch_dtype=torch.bfloat16).to("cuda")
                 pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
                     "black-forest-labs/FLUX.1-Redux-dev",
-                    
                     text_encoder=self.pipe.text_encoder,
                     text_encoder_2=self.pipe.text_encoder_2,
                     tokenizer=self.pipe.tokenizer,
@@ -471,29 +482,18 @@ class FluxControlNetTab:
                     torch_dtype=torch.bfloat16
                 ).to("cuda")
                 
-                second_image = control_image2
-                #second_image = control_image2 if control_image2 is not None else control_image
-                #prompt_embeds_scale_1=1.0
-                #pooled_prompt_embeds_scale_1=1.0
-                #reference_scale=0.03
-                #my_image=control_image
-                my_prompt=prompt
-                my_prompt2=prompt
+                my_prompt = prompt
+                my_prompt2 = prompt
                 
-                if second_image is not None:
+                if control_image2 is not None:
                     pipe_prior_output = pipe_prior_redux([control_image, control_image2], 
                                                         prompt=[my_prompt, my_prompt2],
-                                                        prompt_embeds_scale = [prompt_embeds_scale_1, prompt_embeds_scale_2],
-                                                        pooled_prompt_embeds_scale = [pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2])
+                                                        prompt_embeds_scale=[prompt_embeds_scale_1, prompt_embeds_scale_2],
+                                                        pooled_prompt_embeds_scale=[pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2])
                 else:
-                    pipe_prior_output = pipe_prior_redux(control_image, prompt=my_prompt, prompt_embeds_scale = [prompt_embeds_scale_1],
-                                                        pooled_prompt_embeds_scale = [pooled_prompt_embeds_scale_1])
+                    pipe_prior_output = pipe_prior_redux(control_image, prompt=my_prompt, prompt_embeds_scale=[prompt_embeds_scale_1],
+                                                        pooled_prompt_embeds_scale=[pooled_prompt_embeds_scale_1])
                 
-                
-                
-                #pipe_prior_output = pipe_prior_redux(control_image, prompt=prompt, prompt_embeds_scale = [prompt_embeds_scale_1],
-                #                            pooled_prompt_embeds_scale = [pooled_prompt_embeds_scale_1])
-                                            
                 cond_size = 729
                 hidden_size = 4096
                 max_sequence_length = 512
@@ -506,34 +506,26 @@ class FluxControlNetTab:
                     torch.tensor(reference_scale, dtype=torch.bfloat16).clamp(min=1e-5, max=1)
                 )
                 attention_mask[:, max_sequence_length : max_sequence_length + cond_size] = bias
-                joint_attention_kwargs=dict(attention_mask=attention_mask)                            
-                #pipe_prior_output = pipe_prior_redux(control_image, prompt)
-                #my_image = control_image
+                joint_attention_kwargs = dict(attention_mask=attention_mask)
                 
-                
-            
                 with torch.inference_mode():
                     result = self.pipe(
-                        #prompt=prompt,
-                        #control_image=control_image,
-                        #height=height,
-                        #width=width,
                         guidance_scale=guidance,
                         num_inference_steps=int(steps),
                         generator=torch.Generator("cpu").manual_seed(seed_value),
                         joint_attention_kwargs=joint_attention_kwargs,
                         **pipe_prior_output,
                     )
-                    
-                
             
             debug_print("\nGeneracion completada", debug_enabled)
             clear_memory(debug_enabled)
+
+            # Get the value from the output_dir Textbox
             
-            output_dir = "./outputs/fluxcontrolnet"
-            os.makedirs(output_dir, exist_ok=True)
-        
-                # Generar nombre de archivo
+            #output_directory = output_dir.value if hasattr(output_dir, 'value') else str(output_dir)
+            output_directory = self.output_dir
+            
+            os.makedirs(output_directory, exist_ok=True)
             timestamp = datetime.now().strftime("%y_%m_%d")
             mode_map = {
                 "canny": "canny",
@@ -541,72 +533,89 @@ class FluxControlNetTab:
                 "redux": "redux"
             }
             filename = f"{mode_map[self.current_processor]}_{seed_value}_{timestamp}.png"
-            file_path = os.path.join(os.path.join(os.path.join(output_dir, filename)))
-        
-            # Guardar imagen
+            file_path = os.path.join(output_directory, filename)
+            
             result_image = result.images[0]
             result_image.save(file_path)
             self.logger.log(f"Imagen guardada en: {file_path}")
-            
             return result.images[0]
-            
             
         except Exception as e:
             self.logger.log(f"\nError en la generacion: {str(e)}")
             self.logger.log("Stacktrace:" + traceback.format_exc())
             return None
 
-        
 def on_ui_tabs():
     flux_tab = FluxControlNetTab()
+    settings = load_settings()
+    if settings:
+        initial_checkpoints = settings["checkpoint_path"]
+        #initial_debug = settings["debug_mode"]
+    else:
+        initial_checkpoints = "./models/stable-diffusion/"
+        initial_debug = False 
     
-    with gr.Blocks(analytics_enabled=False) as flux_interface:
+    #with gr.Blocks(analytics_enabled=False) as flux_interface:
+    with gr.Blocks() as flux_interface:
         with gr.Row():
             gr.HTML(
                 """
                 <div style="text-align: center; max-width: 650px; margin: 0 auto">
-                    <h1>Unofficial Flux1 Dev Controlnet By Academia SD</h1>
-                    
+                    <h3>Flux.1 Tools ControlNet by Academia SD</h3>
                 </div>
                 """
             )
         with gr.Row():
-            canny_btn = gr.Button("Canny", variant="secondary")
-            depth_btn = gr.Button("Depth", variant="primary")
-            redux_btn = gr.Button("Redux", variant="primary")
-            
-        
-        with gr.Row():
-           
-            input_image = gr.Image(label="Control Image", source="upload", type="numpy", interactive=True)
-            control_image2 = gr.Image(label="Control Image 2", source="upload", type="numpy", interactive=True, visible=False) # Nueva 
-            reference_image = gr.Image(label="Reference Image", type="numpy", interactive=False)
-            output_image = gr.Image(label="Generated Image", elem_id="generated_image", type="pil", interactive=False)
+            gr.Column(scale=2)
+            with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
+                canny_btn = gr.Button("Canny", variant="secondary")
+            with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
+                depth_btn = gr.Button("Depth", variant="primary")    
+            with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
+                redux_btn = gr.Button("Redux", variant="primary")    
+            gr.Column(scale=2) 
 
         with gr.Row():
-            get_dimensions_btn = gr.Button("Get Image Dimensions")
-            use_default = gr.Button("Use Default Image")
-            preprocess_btn = gr.Button("Run Preprocessor", variant="secondary", visible=True)
-            generate_btn = gr.Button("Generate", variant="primary")
             
+            input_image = gr.Image(label="Control Image", source="upload", type="numpy", interactive=True)
+            control_image2 = gr.Image(label="Control Image 2", source="upload", type="numpy", interactive=True, visible=False)
+            reference_image = gr.Image(label="Reference Image", type="pil", interactive=False)
+            output_gallery = gr.Gallery(label="Generated Images", type="pil", elem_id="generated_image", show_label=True, interactive=True)
+              
         with gr.Row():
-            prompt = gr.Textbox(label="Prompt", placeholder="Enter your prompt here...")
+            
+            with gr.Column(scale=1):
+                get_dimensions_btn = gr.Button("Get Image Dimensions")
+            with gr.Column(scale=1):
+                use_default = gr.Button("Use Default Image")
+            with gr.Column(scale=1):
+                preprocess_btn = gr.Button("Run Preprocessor", variant="secondary", visible=True)
+            with gr.Column(scale=1):
+                send_to_control_btn = gr.Button("Send to Control Image", variant="secondary")
+            with gr.Column(scale=1):    
+                generate_btn = gr.Button("Generate", variant="primary")
+      
+        with gr.Row():
+            with gr.Column(scale=5):
+                prompt = gr.Textbox(label="Prompt", placeholder="Enter your prompt here...")
+            with gr.Column(scale=0.1):  # Este column ocupará 1/5 del espacio
+                use_hyper_flux = gr.Checkbox(label="Use Hyper-FLUX.1 LoRA", value=True)
+            with gr.Column(scale=0.1):
+                batch = gr.Slider(label="Batch :", minimum=1, maximum=100, value=1, step=1)
+               
         with gr.Row():
             width = gr.Slider(label="Width :", minimum=256, maximum=2048, value=1024, step=16)
             height = gr.Slider(label="Height :", minimum=256, maximum=2048, value=1024, step=16)
-            steps = gr.Slider(label="Inference_Steps :", minimum=1, maximum=100, value=30, step=1)
+            steps = gr.Slider(label="Inference Steps :", minimum=1, maximum=100, value=8, step=1)
             guidance = gr.Slider(label="Guidance_Scale:", minimum=1, maximum=100, value=30, step=0.1)
             with gr.Row():
                 seed = gr.Slider(label="Seed_Value :", minimum=0, maximum=9999999999, value=0, step=1)
                 randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
-        
-        
-        # CONTROLES DE PREPROCESAMIENTO: Se definen una única vez, con visibilidad según el modo
         with gr.Row():
             low_threshold = gr.Slider(label="Low Threshold:", minimum=0, maximum=256, value=50, step=1, visible=True)
             high_threshold = gr.Slider(label="High Threshold:", minimum=0, maximum=256, value=200, step=1, visible=True)
-            detect_resolution = gr.Slider(label="Detect Resolution:", minimum=128, maximum=2048, value=1024, step=16, visible=True)
-            image_resolution = gr.Slider(label="Image Resolution:", minimum=128, maximum=2048, value=1024, step=16, visible=True)
+            detect_resolution = gr.Slider(label="Detect Resolution:", minimum=256, maximum=2048, value=1024, step=16, visible=True)
+            image_resolution = gr.Slider(label="Image Resolution:", minimum=256, maximum=2048, value=1024, step=16, visible=True)
             processor_id = gr.Dropdown(
                 choices=["depth_leres", "depth_leres++", "depth_midas", "depth_zoe"],
                 label="Depth processor:",
@@ -658,24 +667,63 @@ def on_ui_tabs():
                 value=1,
                 visible=False
             )
-            
-        with gr.Row(elem_id=f"image_buttons", elem_classes="image-buttons"):
+        with gr.Row(elem_id="image_buttons", elem_classes="image-buttons"):
             buttons = {
-                'img2img': ToolButton('🖼️', elem_id=f'_send_to_img2img', tooltip="Send image to img2img tab."),
-                'inpaint': ToolButton('🎨️', elem_id=f'_send_to_inpaint', tooltip="Send image to img2img inpaint tab."),
-                'extras': ToolButton('📐', elem_id=f'_send_to_extras', tooltip="Send image to extras tab."),
+                'img2img': ToolButton('🖼️', elem_id='_send_to_img2img', tooltip="Send image to img2img tab."),
+                'inpaint': ToolButton('🎨️', elem_id='_send_to_inpaint', tooltip="Send image to img2img inpaint tab."),
+                'extras': ToolButton('📐', elem_id='_send_to_extras', tooltip="Send image to extras tab."),
             }
             for paste_tabname, paste_button in buttons.items():
                 parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
-                    paste_button=paste_button, tabname=paste_tabname, source_tabname=None, source_image_component=output_image,
+                    paste_button=paste_button, tabname=paste_tabname, source_tabname=None, source_image_component=output_gallery,
                     paste_field_names=[]
                 ))
-
         with gr.Accordion("Advanced Settings", open=False):
             with gr.Row():
-                use_hyper_flux = gr.Checkbox(label="Use Redux Hyper-FluxLoRA", value=True)
+                with gr.Column(scale=5):
+                    hf_token = gr.Textbox(
+                        label="Hugging Face Read Token:",
+                        placeholder="Enter your Hugging Face token...",
+                        type="password"
+                    )
             with gr.Row():
-                # Añadir el log box
+                gr.Column(scale=1)
+                gr.Column(scale=1)
+                with gr.Column(scale=1):
+                    save_settingsHF_btn = gr.Button("Save HF Token:", variant="primary")
+                gr.Column(scale=1)
+                gr.Column(scale=1)        
+            
+            settings = load_settings() or {}
+            checkpoint_value = settings.get("checkpoint_path", "./models/Stable-diffusion/")
+            output_value = settings.get("output_dir", "./outputs/fluxcontrolnet/")
+            
+            
+            with gr.Row():
+                checkpoint_path = gr.Textbox(
+                    label="Checkpoints_Path :",
+                    value=checkpoint_value,  # Valor inicial desde la instancia
+                    placeholder="Enter model path..."
+                )
+                
+                #output_dir = output_dir if 'output_dir' in globals() and output_dir else "./outputs/fluxcontrolnet/"
+                output_dir = gr.Textbox(
+                    label="Output_Images_Path :",
+                    value=output_value,  # Valor inicial desde la instancia
+                    placeholder="Enter output path..."
+                )
+                            
+            with gr.Row():
+                with gr.Column(scale=1):
+                    update_path_btn = gr.Button("Update_Path", size="sm", value=False)
+                gr.Column(scale=1)
+                with gr.Column(scale=1):
+                    save_settings_btn = gr.Button("Save Settings", variant="primary")
+                gr.Column(scale=1)
+                with gr.Column(scale=1):
+                    debug = gr.Checkbox(label="Debug Mode", value=False)
+            
+            with gr.Row():
                 log_box = gr.Textbox(
                     label="Latest Logs",
                     interactive=False,
@@ -683,102 +731,112 @@ def on_ui_tabs():
                     value="Waiting for operations..."
                 )
                 flux_tab.logger.log_box = log_box
-                
-            with gr.Row():
-                model_path = gr.Textbox(
-                    label="Models Path:", 
-                    value="Academia-SD/flux1-dev-text_encoders-NF4",
-                    interactive=True,
-                    placeholder="Enter model path..."
-                )
-            with gr.Row():
-                
-                
-                update_path_btn = gr.Button("?? Update Path", size="sm")
-                debug = gr.Checkbox(label="Debug Mode", value=False)
-
-        # Función auxiliar para actualizar botones y controles de preprocesamiento
-        #Updated FluxControlNet Mode Change Handlers
-
-        def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
-            # Obtener las actualizaciones de botones y controles
-            btn_updates = flux_tab.update_processor_and_model(mode)
             
+            #botones
+            
+            # Función wrapper para actualizar la instancia al guardar
+            def save_settings_wrapper(checkpoint_path_val, output_dir_val, debug_val):
+                log_msg, new_cp, new_od = save_settings(checkpoint_path_val, output_dir_val, debug_val)
+                flux_tab.checkpoint_path = new_cp
+                flux_tab.output_dir = new_od
+                return log_msg, new_cp, new_od
+            
+            save_settings_btn.click(
+                fn=save_settings_wrapper,
+                inputs=[checkpoint_path, output_dir, debug],
+                outputs=[log_box, checkpoint_path, output_dir]
+            )
+
+            save_settingsHF_btn.click(
+                fn=save_settingsHF,
+                inputs=[hf_token],
+                outputs=[log_box]
+            )
+       
+            #use_default.click(fn=lambda: load_image("./extensions/sd-forge-fluxcontrolnet/assets/default.png"), outputs=[input_image])
+            get_dimensions_btn.click(
+                fn=update_dimensions,
+                inputs=[input_image, width, height],
+                outputs=[width, height]
+            )
+        def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
+            btn_updates = flux_tab.update_processor_and_model(mode)
+            if mode != "redux":
+                control_image2_update = gr.update(value=None, visible=False)
+            else:
+                control_image2_update = gr.update(visible=True)
+                
             if mode == "canny":
                 default_steps = 8 if use_hyper_flux else 30
                 ctrl_updates = [
-                    gr.update(visible=True),   # low_threshold
-                    gr.update(visible=True),   # high_threshold
-                    gr.update(visible=True),   # detect_resolution
-                    gr.update(visible=True),   # image_resolution
-                    gr.update(visible=False),  # processor_id dropdown
-                    gr.update(visible=False),  # reference_scale
-                    gr.update(visible=False),  # prompt_embeds_scale_1
-                    gr.update(visible=False),  # prompt_embeds_scale_2
-                    gr.update(visible=False),  # pooled_prompt_embeds_scale_1
-                    gr.update(visible=False),  # pooled_prompt_embeds_scale_2
-                    gr.update(value=30),       # steps
-                    gr.update(value=30),       # guidance
-                    gr.update(visible=True),   # reference_image
-                    gr.update(visible=False),  # control_image2
+                    gr.update(visible=True),    # low_threshold
+                    gr.update(visible=True),    # high_threshold
+                    gr.update(visible=True),    # detect_resolution
+                    gr.update(visible=True),    # image_resolution
+                    gr.update(visible=False),   # processor_id dropdown
+                    gr.update(visible=False),   # reference_scale
+                    gr.update(visible=False),   # prompt_embeds_scale_1
+                    gr.update(visible=False),   # prompt_embeds_scale_2
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
+                    gr.update(value=default_steps),  # steps
+                    gr.update(value=30),        # guidance
+                    gr.update(visible=True),    # reference_image
+                    gr.update(visible=False),   # control_image2
+                    control_image2_update
                 ]
             elif mode == "depth":
                 default_steps = 8 if use_hyper_flux else 30
                 ctrl_updates = [
-                    gr.update(visible=False),  # low_threshold
-                    gr.update(visible=False),  # high_threshold
-                    gr.update(visible=False),  # detect_resolution
-                    gr.update(visible=False),  # image_resolution
-                    gr.update(visible=True),   # processor_id dropdown
-                    gr.update(visible=False),  # reference_scale
-                    gr.update(visible=False),  # prompt_embeds_scale_1
-                    gr.update(visible=False),  # prompt_embeds_scale_2
-                    gr.update(visible=False),  # pooled_prompt_embeds_scale_1
-                    gr.update(visible=False),  # pooled_prompt_embeds_scale_2
-                    gr.update(value=25),       # steps
-                    gr.update(value=30),       # guidance
-                    gr.update(visible=True),   # reference_image
-                    gr.update(visible=False),  # control_image2
+                    gr.update(visible=False),   # low_threshold
+                    gr.update(visible=False),   # high_threshold
+                    gr.update(visible=False),   # detect_resolution
+                    gr.update(visible=False),   # image_resolution
+                    gr.update(visible=True),    # processor_id dropdown
+                    gr.update(visible=False),   # reference_scale
+                    gr.update(visible=False),   # prompt_embeds_scale_1
+                    gr.update(visible=False),   # prompt_embeds_scale_2
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
+                    gr.update(value=default_steps),  # steps
+                    gr.update(value=30),        # guidance
+                    gr.update(visible=True),    # reference_image
+                    gr.update(visible=False),   # control_image2
+                    control_image2_update
                 ]
             elif mode == "redux":
                 default_steps = 8 if use_hyper_flux else 30
                 ctrl_updates = [
-                    gr.update(visible=False),  # low_threshold
-                    gr.update(visible=False),  # high_threshold
-                    gr.update(visible=False),  # detect_resolution
-                    gr.update(visible=False),  # image_resolution
-                    gr.update(visible=False),  # processor_id dropdown
-                    gr.update(visible=True),   # reference_scale
-                    gr.update(visible=True),   # prompt_embeds_scale_1
-                    gr.update(visible=True),   # prompt_embeds_scale_2
-                    gr.update(visible=True),   # pooled_prompt_embeds_scale_1
-                    gr.update(visible=True),   # pooled_prompt_embeds_scale_2
+                    gr.update(visible=False),   # low_threshold
+                    gr.update(visible=False),   # high_threshold
+                    gr.update(visible=False),   # detect_resolution
+                    gr.update(visible=False),   # image_resolution
+                    gr.update(visible=False),   # processor_id dropdown
+                    gr.update(visible=True),    # reference_scale
+                    gr.update(visible=True),    # prompt_embeds_scale_1
+                    gr.update(visible=True),    # prompt_embeds_scale_2
+                    gr.update(visible=True),    # pooled_prompt_embeds_scale_1
+                    gr.update(visible=True),    # pooled_prompt_embeds_scale_2
                     gr.update(value=default_steps),  # steps
-                    gr.update(value=3.5),      # guidance
-                    gr.update(visible=False),  # reference_image
-                    gr.update(visible=True),   # control_image2
+                    gr.update(value=3.5),       # guidance
+                    gr.update(visible=False),   # reference_image
+                    gr.update(visible=True),    # control_image2
+                    control_image2_update
                 ]
-            
             processed_image = None
             if mode != "redux" and input_image is not None:
                 processed_image = flux_tab.preprocess_image(
                     input_image, low_threshold, high_threshold, 
                     detect_resolution, image_resolution, debug, processor_id
                 )
-            
-            # Retornar todas las actualizaciones más la imagen procesada
             return btn_updates + ctrl_updates + [processed_image if mode != "redux" else None]
-                    
-
-
-        # Event listeners for auto-preprocessing
-         # Listeners para cambios en la imagen y sliders (preprocesador)
+        
         input_image.change(
             fn=flux_tab.preprocess_image,
             inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
             outputs=[reference_image]
         ).then(
-            fn=lambda: None,  # Función dummy para mantener la cadena de eventos
+            fn=lambda: None,
             inputs=None,
             outputs=None
         )
@@ -803,7 +861,7 @@ def on_ui_tabs():
             outputs=[reference_image]
         )
         
-        use_default.click(fn=lambda: load_image("./extensions/sd-forge-fluxcontrolnet/assets/default.png"), outputs=[input_image])
+        #use_default.click(fn=lambda: load_image("./extensions/sd-forge-fluxcontrolnet/assets/default.png"), outputs=[input_image])
         get_dimensions_btn.click(
             fn=update_dimensions,
             inputs=[input_image, width, height],
@@ -816,80 +874,79 @@ def on_ui_tabs():
         )
         update_path_btn.click(
             fn=flux_tab.preprocess_image,
-            inputs=[model_path, debug],
-            outputs=[model_path]
+            inputs=[checkpoint_path, debug],
+            outputs=[checkpoint_path]
         )
         use_hyper_flux.change(
             fn=lambda x: gr.update(value=8 if x else 30),
             inputs=[use_hyper_flux],
             outputs=[steps]
         )
-        
         def update_preprocessing(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
             if input_image is not None:
                 return flux_tab.preprocess_image(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id)
             return None
-
+            
         for slider in [low_threshold, high_threshold, detect_resolution, image_resolution]:
             slider.release(
                 fn=update_preprocessing,
                 inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
                 outputs=[reference_image]
             )
-      
         def pre_generate():
-            """Función que se ejecuta antes de la generación"""
             return gr.Button.update(value="Generating...", variant="secondary", interactive=False)
-
         def post_generate(result):
-            """Función que se ejecuta después de la generación"""
             return result, gr.Button.update(value="Generate", variant="primary", interactive=True)
-
+        # Se ha modificado la función generate_with_state para quitar los parámetros innecesarios
         def generate_with_state(
             prompt, input_image, width, height, steps, guidance,
             low_threshold, high_threshold, detect_resolution, image_resolution,
             reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
             prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
-            pooled_prompt_embeds_scale_2, use_hyper_flux, text_encoder, text_encoder_2, 
-            tokenizer, tokenizer_2
+            pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
         ):
             try:
-                result = flux_tab.generate(
-                    prompt=prompt,
-                    input_image=input_image,
-                    width=width,
-                    height=height,
-                    steps=steps,
-                    guidance=guidance,
-                    low_threshold=low_threshold,
-                    high_threshold=high_threshold,
-                    detect_resolution=detect_resolution,
-                    image_resolution=image_resolution,
-                    reference_image=reference_image,
-                    debug=debug,
-                    processor_id=processor_id,
-                    seed=seed,
-                    randomize_seed=randomize_seed,
-                    reference_scale=reference_scale,
-                    prompt_embeds_scale_1=prompt_embeds_scale_1,
-                    prompt_embeds_scale_2=prompt_embeds_scale_2,
-                    pooled_prompt_embeds_scale_1=pooled_prompt_embeds_scale_1,
-                    pooled_prompt_embeds_scale_2=pooled_prompt_embeds_scale_2,
-                    text_encoder=None,
-                    text_encoder_2=None,
-                    tokenizer=None,
-                    tokenizer_2=None,
-                    debug_enabled=debug,
-                    use_hyper_flux=use_hyper_flux
-                )
-                log_text = flux_tab.logger.log("Generation completed")
-                return result, log_text
+                results = []
+                for i in range(int(batch)):
+                    local_seed = random.randint(0, 999999999) if randomize_seed else seed
+                    result = flux_tab.generate(
+                        prompt=prompt,
+                        input_image=input_image,
+                        width=width,
+                        height=height,
+                        steps=steps,
+                        guidance=guidance,
+                        low_threshold=low_threshold,
+                        high_threshold=high_threshold,
+                        detect_resolution=detect_resolution,
+                        image_resolution=image_resolution,
+                        reference_image=reference_image,
+                        debug=debug,
+                        processor_id=processor_id,
+                        seed=local_seed,
+                        randomize_seed=randomize_seed,
+                        reference_scale=reference_scale,
+                        prompt_embeds_scale_1=prompt_embeds_scale_1,
+                        prompt_embeds_scale_2=prompt_embeds_scale_2,
+                        pooled_prompt_embeds_scale_1=pooled_prompt_embeds_scale_1,
+                        pooled_prompt_embeds_scale_2=pooled_prompt_embeds_scale_2,
+                        text_encoder=None,
+                        text_encoder_2=None,
+                        tokenizer=None,
+                        tokenizer_2=None,
+                        debug_enabled=debug,
+                        use_hyper_flux=use_hyper_flux,
+                        control_image2=control_image2,
+                        output_dir=output_dir
+                    )
+                    if result is not None:
+                        results.append(result)
+                log_text = flux_tab.logger.log("Completed!")
+                return results, log_text
             except Exception as e:
                 error_msg = f"Error during generation: {str(e)}"
                 log_text = flux_tab.logger.log(error_msg)
                 return None, log_text
-
-        # Configurar el evento del botón con pre y post procesamiento
         generate_btn.click(
             fn=pre_generate,
             inputs=None,
@@ -901,16 +958,26 @@ def on_ui_tabs():
                 low_threshold, high_threshold, detect_resolution, image_resolution,
                 reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
                 prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
-                pooled_prompt_embeds_scale_2, use_hyper_flux
+                pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
             ],
-            outputs=[output_image, log_box],
+            outputs=[output_gallery, log_box],
         ).then(
             fn=post_generate,
-            inputs=[output_image],
-            outputs=[output_image, generate_btn]
+            inputs=[output_gallery],
+            outputs=[output_gallery, generate_btn]
+        )
+        send_to_control_btn.click(
+            #fn=lambda generated: generated,
+            #inputs=[output_gallery],
+            #outputs=[input_image]
+            output_gallery.select(
+            fn=lambda evt: evt,
+            inputs=[output_gallery],
+            outputs=[input_image]
+)
         )
         
-                # Actualizar los event listeners de los botones para incluir control_image2
+      
         canny_btn.click(
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "canny", use_hyper, img, lt, ht, dr, ir, debug, pid
@@ -928,13 +995,13 @@ def on_ui_tabs():
                 steps, guidance,
                 reference_image, control_image2
             ]
-        ).then(  # Agregar actualización adicional para reference_image
+        ).then(
             fn=update_preprocessing,
             inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
             outputs=[reference_image]
         )
-
         depth_btn.click(
+            
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "depth", use_hyper, img, lt, ht, dr, ir, debug, pid
             ),
@@ -951,19 +1018,18 @@ def on_ui_tabs():
                 steps, guidance,
                 reference_image, control_image2
             ]
-        ).then(  # Agregar actualización adicional para reference_image
+        ).then(
+            
             fn=update_preprocessing,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+            inputs=[input_image, debug, processor_id],
             outputs=[reference_image]
         )
-
         redux_btn.click(
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "redux", use_hyper, img, lt, ht, dr, ir, debug, pid
             ),
             inputs=[
-                use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id
+                use_hyper_flux, input_image, debug, processor_id
             ],
             outputs=[
                 canny_btn, depth_btn, redux_btn,
@@ -975,8 +1041,6 @@ def on_ui_tabs():
                 reference_image, control_image2
             ]
         )
-        
-    return [(flux_interface, "Flux.1 ControlNet", "flux_controlnet_tab")]
+    return [(flux_interface, "Flux.1 Tools", "flux_controlnet_tab")]
 
-# Register the tab
-script_callbacks.on_ui_tabs(on_ui_tabs)        
+script_callbacks.on_ui_tabs(on_ui_tabs)
