@@ -142,12 +142,10 @@ def load_settings():
         }
         
         if os.path.exists(config_path):
-            print("encuentra ")
-            #print(f"Encuentra {new_path}")
+
             with open(config_path, 'r') as f:
                 loaded_settings = json.load(f)
-                print("Configuración cargada:", loaded_settings)
-                # Asegurar compatibilidad con claves correctas
+
                 settings.update(loaded_settings)
         
         return settings
@@ -698,8 +696,13 @@ def on_ui_tabs():
             checkpoint_value = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             output_value = settings.get("output_dir", "./outputs/fluxcontrolnet/")
             
-            
             with gr.Row():
+                ckpt_display = gr.Markdown(f"Latest checkpoints path: `{checkpoint_value}`")
+                outp_display = gr.Markdown(f"Latest images output dir: `{output_value}`")
+       
+     
+            with gr.Row():
+                
                 checkpoint_path = gr.Textbox(
                     label="Checkpoints_Path :",
                     value=checkpoint_value,  # Valor inicial desde la instancia
@@ -715,7 +718,7 @@ def on_ui_tabs():
                             
             with gr.Row():
                 with gr.Column(scale=1):
-                    update_path_btn = gr.Button("Update_Path", size="sm", value=False)
+                    update_path_btn = gr.Button(" Update_Path: ", size="sm", value=False, visible=False)
                 gr.Column(scale=1)
                 with gr.Column(scale=1):
                     save_settings_btn = gr.Button("Save Settings", variant="primary")
@@ -739,9 +742,12 @@ def on_ui_tabs():
                 log_msg, new_cp, new_od = save_settings(checkpoint_path_val, output_dir_val, debug_val)
                 flux_tab.checkpoint_path = new_cp
                 flux_tab.output_dir = new_od
+
+                
                 return log_msg, new_cp, new_od
             
             save_settings_btn.click(
+                
                 fn=save_settings_wrapper,
                 inputs=[checkpoint_path, output_dir, debug],
                 outputs=[log_box, checkpoint_path, output_dir]
