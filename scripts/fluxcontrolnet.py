@@ -26,6 +26,30 @@ from huggingface_hub import login
 import threading
 import json
 import os
+import io
+import logging
+import sys
+from h11._util import LocalProtocolError
+
+class CustomErrorFilter(logging.Filter):
+    def filter(self, record):
+        if record.exc_info:
+            err_msg = str(record.exc_info[1])
+            return not ("Too little data for declared Content-Length" in err_msg or 
+                       "Too much data for declared Content-Length" in err_msg)
+        return True
+
+# Aplicar el filtro al logger de uvicorn
+logging.getLogger("uvicorn.error").addFilter(CustomErrorFilter())
+
+# También redirigir stderr para casos que no pase el logger
+class ErrorFilter(io.StringIO):
+    def write(self, message):
+        if ("Too little data for declared Content-Length" not in message and
+            "Too much data for declared Content-Length" not in message):
+            sys.__stderr__.write(message)
+
+sys.stderr = ErrorFilter()
 
 
 # Academia-SD/flux1-dev-text_encoders-NF4
@@ -608,8 +632,44 @@ def on_ui_tabs():
 
         with gr.Row():
             
-            input_image = gr.Image(label="Control Image", source="upload", type="numpy", interactive=True)
-            control_image2 = gr.Image(label="Control Image 2", source="upload", type="numpy", interactive=True, visible=False)
+            def handle_image_upload(image):
+                try:
+                    if image is None:
+                        return None
+                    # Asegurar que la imagen está en el formato correcto
+                    if isinstance(image, np.ndarray):
+                        if len(image.shape) == 2:  # Si es escala de grises
+                            image = np.stack([image] * 3, axis=-1)
+                        elif len(image.shape) == 3 and image.shape[2] == 4:  # Si es RGBA
+                            image = image[:, :, :3]  # Convertir a RGB
+                    return image
+                except Exception as e:
+                    print(f"Error al cargar la imagen: {str(e)}")
+                    return None
+
+        # Luego definimos el componente input_image con los parámetros mejorados
+            input_image = gr.Image(
+                label="Control Image", 
+                source="upload", 
+                type="numpy",
+                interactive=True,
+                scale=1,
+                #height=512,  # Aumentamos la altura
+                #width=512,   # Especificamos el ancho
+                every=1,
+                container=True,  # Esto ayuda con el escalado
+                image_mode='RGB'
+            )
+            control_image2 = gr.Image(
+                label="Control Image 2", 
+                source="upload", 
+                type="numpy",
+                interactive=True,
+                visible=False,
+                container=True,
+                image_mode='RGB',
+                every=1
+            )
             reference_image = gr.Image(label="Reference Image", type="pil", interactive=False)
             output_gallery = gr.Gallery(label="Generated Images ", type="pil", elem_id="generated_image", show_label=True, interactive=False)
             selected_image = gr.State() 
@@ -903,11 +963,36 @@ def on_ui_tabs():
             return ctrl_updates
                     
             
-        input_image.change(
-            fn=lambda mode: flux_tab.current_processor,  # Obtener el modo actual
-            outputs=[gr.State()],
+        def safe_load_image(img):
+            try:
+                if img is None:
+                    return None
+                # Asegurarnos de que la imagen esté en el formato correcto
+                if isinstance(img, np.ndarray):
+                    # Hacer una copia para evitar problemas de memoria compartida
+                    return img.copy()
+                return img
+            except Exception as e:
+                print(f"Error en la carga de imagen: {e}")
+                return None
+
+        # Separar el evento de carga del evento de preprocesamiento
+        input_image.upload(
+            fn=safe_load_image,
+            inputs=[input_image],
+            outputs=[input_image],
             queue=False
-        ).then(
+        )
+        
+        control_image2.upload(
+            fn=safe_load_image,  # Usa la misma función safe_load_image
+            inputs=[control_image2],
+            outputs=[control_image2],
+            queue=False
+        )
+        
+        # Evento separado para el preprocesamiento
+        input_image.change(
             fn=flux_tab.preprocess_image,
             inputs=[
                 input_image, 
@@ -916,9 +1001,10 @@ def on_ui_tabs():
                 detect_resolution, 
                 image_resolution, 
                 debug, 
-                processor_id  # Usar el processor_id actualizado
+                processor_id
             ],
-            outputs=[reference_image]
+            outputs=[reference_image],
+            queue=False
         )
         
         low_threshold.release(
