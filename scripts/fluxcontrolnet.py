@@ -257,26 +257,36 @@ class FluxControlNetTab:
     def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None, control_image2=None):
         try:
             debug_print("\nStarting preprocessing...", debug_enabled)
+            
+            # 1. Cargar y validar imagen
             control_image = self.load_control_image(input_image)
-            if self.current_processor in ["canny", "depth"]:
-                if self.current_processor == "canny":
-                    processor = self.get_processor()
-                    control_image = processor(
-                        control_image, 
-                        low_threshold=int(low_threshold),
-                        high_threshold=int(high_threshold),
-                        detect_resolution=int(detect_resolution),
-                        image_resolution=int(image_resolution)
-                    )
-                elif self.current_processor == "depth":
-                    actual_processor_id = processor_id if processor_id is not None else self.default_processor_id
-                    processor = Processor(actual_processor_id)
-                    control_image = processor(
-                        control_image,
-                    )
-                debug_print("\nPreprocess Done.", debug_enabled)
-                return np.array(control_image)
-            return None
+            if not control_image:
+                raise ValueError("Failed to load control image")
+                
+            # 2. Convertir a RGB si es necesario
+            if control_image.mode != 'RGB':
+                control_image = control_image.convert('RGB')
+                
+            # 3. Aplicar preprocesamiento según el modo
+            if self.current_processor == "canny":
+                processor = CannyDetector()
+                control_image = processor(
+                    control_image, 
+                    low_threshold=int(low_threshold),
+                    high_threshold=int(high_threshold),
+                    detect_resolution=int(detect_resolution),
+                    image_resolution=int(image_resolution)
+                )
+            elif self.current_processor == "depth":
+                actual_processor_id = processor_id or 'depth_zoe'
+                processor = Processor(actual_processor_id)
+                
+                # Procesamiento especial para depth
+                control_image = processor(control_image.resize((1024, 1024)))  # Redimensionar para consistencia
+                
+            debug_print("\nPreprocess Done.", debug_enabled)
+            return np.array(control_image)
+            
         except Exception as e:
             self.logger.log(f"\nError en el preprocesamiento: {str(e)}")
             self.logger.log(f"Stacktrace:\n{traceback.format_exc()}")
@@ -378,14 +388,23 @@ class FluxControlNetTab:
     def load_control_image(self, input_image):
         try:
             if input_image is not None:
-                if not isinstance(input_image, np.ndarray):
-                    raise ValueError("Invalid input image format")
-                if input_image.size == 0 or input_image.shape[0] == 0 or input_image.shape[1] == 0:
-                    raise ValueError("Empty or corrupted input image")
-                image = Image.fromarray(input_image.astype('uint8'))
-                if not isinstance(image, Image.Image):
-                    raise ValueError("Failed to create PIL Image")
-                return image
+                # Convertir numpy array a PIL Image
+                if isinstance(input_image, np.ndarray):
+                    if input_image.size == 0:
+                        raise ValueError("Empty numpy array")
+                    image = Image.fromarray(input_image.astype('uint8'))
+                    return image.convert('RGB')  # Asegurar modo RGB
+                
+                # Si ya es PIL Image
+                if isinstance(input_image, Image.Image):
+                    return input_image.convert('RGB')
+                
+            # Crear imagen blanca por defecto si todo falla
+            return Image.new('RGB', (512, 512), color='white')
+            
+        except Exception as e:
+            self.logger.log(f"Error loading control image: {str(e)}")
+            return Image.new('RGB', (512, 512), color='white')
             #default_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png"
             
             #if os.path.exists(default_path):
@@ -779,6 +798,13 @@ def on_ui_tabs():
             )
         def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
             btn_updates = flux_tab.update_processor_and_model(mode)
+            
+            new_processor_id = None
+            if mode == "depth":
+                new_processor_id = 'depth_zoe'
+            elif mode == "canny":
+                new_processor_id = 'canny'
+            
             if mode != "redux":
                 control_image2_update = gr.update(value=None, visible=False)
             else:
@@ -845,22 +871,36 @@ def on_ui_tabs():
                     control_image2_update
                 ]
             processed_image = None
-            if mode != "redux" and input_image is not None:
+            if input_image is not None and mode != "redux":
                 processed_image = flux_tab.preprocess_image(
-                    input_image, low_threshold, high_threshold, 
-                    detect_resolution, image_resolution, debug, processor_id
+                    input_image, 
+                    low_threshold, 
+                    high_threshold, 
+                    detect_resolution, 
+                    image_resolution, 
+                    debug, 
+                    new_processor_id if new_processor_id else processor_id  # Usar el nuevo ID
                 )
             return btn_updates + ctrl_updates + [processed_image if mode != "redux" else None]
         
         input_image.change(
-            fn=flux_tab.preprocess_image,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
-            outputs=[reference_image]
+            fn=lambda mode: flux_tab.current_processor,  # Obtener el modo actual
+            outputs=[gr.State()],
+            queue=False
         ).then(
-            fn=lambda: None,
-            inputs=None,
-            outputs=None
+            fn=flux_tab.preprocess_image,
+            inputs=[
+                input_image, 
+                low_threshold, 
+                high_threshold, 
+                detect_resolution, 
+                image_resolution, 
+                debug, 
+                processor_id  # Usar el processor_id actualizado
+            ],
+            outputs=[reference_image]
         )
+        
         low_threshold.release(
             fn=flux_tab.preprocess_image,
             inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
@@ -889,10 +929,25 @@ def on_ui_tabs():
             outputs=[width, height]
         )
         preprocess_btn.click(
+            fn=lambda: gr.update(interactive=False),  # Deshabilitar botón durante procesamiento
+            outputs=[preprocess_btn]
+        ).then(
             fn=flux_tab.preprocess_image,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+            inputs=[
+                input_image, 
+                low_threshold, 
+                high_threshold, 
+                detect_resolution, 
+                image_resolution, 
+                debug, 
+                processor_id  # Asegurar que recibe el processor_id actual
+            ],
             outputs=[reference_image]
+        ).then(
+            fn=lambda: gr.update(interactive=True),  # Rehabilitar botón
+            outputs=[preprocess_btn]
         )
+        
         update_path_btn.click(
             fn=flux_tab.preprocess_image,
             inputs=[checkpoint_path, debug],
@@ -904,6 +959,7 @@ def on_ui_tabs():
             inputs=[use_hyper_flux],
             outputs=[steps]
         )
+        
         def update_preprocessing(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
             if input_image is not None:
                 return flux_tab.preprocess_image(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id)
@@ -1027,12 +1083,15 @@ def on_ui_tabs():
                 reference_image, control_image2
             ]
         ).then(
+            fn=lambda pid: 'canny',  # Forzar el processor_id correcto
+            outputs=[processor_id]
+        ).then(
             fn=update_preprocessing,
             inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
             outputs=[reference_image]
         )
+        
         depth_btn.click(
-            
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "depth", use_hyper, img, lt, ht, dr, ir, debug, pid
             ),
@@ -1050,11 +1109,25 @@ def on_ui_tabs():
                 reference_image, control_image2
             ]
         ).then(
-            
-            fn=update_preprocessing,
-            inputs=[input_image, debug, processor_id],
+            # Forzar actualización del processor_id antes del preprocesamiento
+            fn=lambda: None,
+            inputs=None,
+            outputs=None,
+            queue=False
+        ).then(
+            fn=flux_tab.preprocess_image,
+            inputs=[
+                input_image, 
+                low_threshold, 
+                high_threshold, 
+                detect_resolution, 
+                image_resolution, 
+                debug, 
+                processor_id  # Usar el valor actualizado
+            ],
             outputs=[reference_image]
         )
+        
         redux_btn.click(
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "redux", use_hyper, img, lt, ht, dr, ir, debug, pid
