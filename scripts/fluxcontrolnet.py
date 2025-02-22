@@ -254,23 +254,26 @@ class FluxControlNetTab:
             return 
         return # CannyDetector()  # Default to Canny
 
-    def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None, control_image2=None):
+    def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None):
         try:
+            if input_image is None:
+                return None
+        
             debug_print("\nStarting preprocessing...", debug_enabled)
             
-            # 1. Cargar y validar imagen
+            # Cargar y validar imagen
             control_image = self.load_control_image(input_image)
             if not control_image:
                 raise ValueError("Failed to load control image")
                 
-            # 2. Convertir a RGB si es necesario
+            # Convertir a RGB si es necesario
             if control_image.mode != 'RGB':
                 control_image = control_image.convert('RGB')
                 
-            # 3. Aplicar preprocesamiento según el modo
+            # Aplicar preprocesamiento según el modo
             if self.current_processor == "canny":
                 processor = CannyDetector()
-                control_image = processor(
+                processed_image = processor(
                     control_image, 
                     low_threshold=int(low_threshold),
                     high_threshold=int(high_threshold),
@@ -280,12 +283,12 @@ class FluxControlNetTab:
             elif self.current_processor == "depth":
                 actual_processor_id = processor_id or 'depth_zoe'
                 processor = Processor(actual_processor_id)
-                
-                # Procesamiento especial para depth
-                control_image = processor(control_image.resize((1024, 1024)))  # Redimensionar para consistencia
+                processed_image = processor(control_image)
+            else:
+                processed_image = control_image
                 
             debug_print("\nPreprocess Done.", debug_enabled)
-            return np.array(control_image)
+            return np.array(processed_image)
             
         except Exception as e:
             self.logger.log(f"\nError en el preprocesamiento: {str(e)}")
@@ -797,23 +800,49 @@ def on_ui_tabs():
                 outputs=[width, height]
             )
         def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
-            btn_updates = flux_tab.update_processor_and_model(mode)
+            # Actualizar el modelo
+            flux_tab.update_processor_and_model(mode)
             
-            new_processor_id = None
+            # Forzar el processor_id según el modo
             if mode == "depth":
                 new_processor_id = 'depth_zoe'
             elif mode == "canny":
                 new_processor_id = 'canny'
-            
+            else:
+                new_processor_id = None
+
+            # Realizar el preprocesamiento si hay una imagen
+            processed_image = None
+            if input_image is not None and mode != "redux":
+                try:
+                    if mode == "depth":
+                        processor = Processor('depth_zoe')
+                        temp_image = flux_tab.load_control_image(input_image)
+                        processed_image = processor(temp_image)
+                    elif mode == "canny":
+                        processor = CannyDetector()
+                        temp_image = flux_tab.load_control_image(input_image)
+                        processed_image = processor(
+                            temp_image,
+                            low_threshold=int(low_threshold),
+                            high_threshold=int(high_threshold),
+                            detect_resolution=int(detect_resolution),
+                            image_resolution=int(image_resolution)
+                        )
+                    
+                    if processed_image is not None:
+                        processed_image = np.array(processed_image)
+                except Exception as e:
+                    print(f"Error en preprocesamiento: {str(e)}")
+                    processed_image = None
+
             if mode != "redux":
                 control_image2_update = gr.update(value=None, visible=False)
             else:
                 control_image2_update = gr.update(visible=True)
-                
-            
-                
+
+            # Configurar actualizaciones de UI
             if mode == "canny":
-                
                 default_steps = 30 if not use_hyper_flux else 8
                 ctrl_updates = [
                     gr.update(visible=True),    # low_threshold
@@ -828,7 +857,7 @@ def on_ui_tabs():
                     gr.update(visible=False),   # pooled_prompt_embeds_scale_2
                     gr.update(value=default_steps),  # steps
                     gr.update(value=30),        # guidance
-                    gr.update(visible=True),    # reference_image
+                    gr.update(value=processed_image, visible=True, interactive=False),  # reference_image
                     gr.update(visible=False),   # control_image2
                     control_image2_update
                 ]
@@ -839,7 +868,7 @@ def on_ui_tabs():
                     gr.update(visible=False),   # high_threshold
                     gr.update(visible=False),   # detect_resolution
                     gr.update(visible=False),   # image_resolution
-                    gr.update(visible=True),    # processor_id dropdown
+                    gr.update(visible=True, value='depth_zoe'),  # processor_id dropdown
                     gr.update(visible=False),   # reference_scale
                     gr.update(visible=False),   # prompt_embeds_scale_1
                     gr.update(visible=False),   # prompt_embeds_scale_2
@@ -847,11 +876,11 @@ def on_ui_tabs():
                     gr.update(visible=False),   # pooled_prompt_embeds_scale_2
                     gr.update(value=default_steps),  # steps
                     gr.update(value=30),        # guidance
-                    gr.update(visible=True),    # reference_image
+                    gr.update(value=processed_image, visible=True, interactive=False),  # reference_image
                     gr.update(visible=False),   # control_image2
                     control_image2_update
                 ]
-            elif mode == "redux":
+            else:  # redux
                 default_steps = 30 if not use_hyper_flux else 8
                 ctrl_updates = [
                     gr.update(visible=False),   # low_threshold
@@ -870,19 +899,10 @@ def on_ui_tabs():
                     gr.update(visible=True),    # control_image2
                     control_image2_update
                 ]
-            processed_image = None
-            if input_image is not None and mode != "redux":
-                processed_image = flux_tab.preprocess_image(
-                    input_image, 
-                    low_threshold, 
-                    high_threshold, 
-                    detect_resolution, 
-                    image_resolution, 
-                    debug, 
-                    new_processor_id if new_processor_id else processor_id  # Usar el nuevo ID
-                )
-            return btn_updates + ctrl_updates + [processed_image if mode != "redux" else None]
-        
+
+            return ctrl_updates
+                    
+            
         input_image.change(
             fn=lambda mode: flux_tab.current_processor,  # Obtener el modo actual
             outputs=[gr.State()],
@@ -929,7 +949,7 @@ def on_ui_tabs():
             outputs=[width, height]
         )
         preprocess_btn.click(
-            fn=lambda: gr.update(interactive=False),  # Deshabilitar botón durante procesamiento
+            fn=lambda: gr.update(interactive=False),
             outputs=[preprocess_btn]
         ).then(
             fn=flux_tab.preprocess_image,
@@ -940,11 +960,11 @@ def on_ui_tabs():
                 detect_resolution, 
                 image_resolution, 
                 debug, 
-                processor_id  # Asegurar que recibe el processor_id actual
+                processor_id
             ],
             outputs=[reference_image]
         ).then(
-            fn=lambda: gr.update(interactive=True),  # Rehabilitar botón
+            fn=lambda: gr.update(interactive=True),
             outputs=[preprocess_btn]
         )
         
@@ -1065,33 +1085,16 @@ def on_ui_tabs():
         )
         
 #)      
-        canny_btn.click(
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
-                "canny", use_hyper, img, lt, ht, dr, ir, debug, pid
-            ),
-            inputs=[
-                use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id
-            ],
-            outputs=[
-                canny_btn, depth_btn, redux_btn,
-                low_threshold, high_threshold, detect_resolution, image_resolution,
-                processor_id, reference_scale,
-                prompt_embeds_scale_1, prompt_embeds_scale_2,
-                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
-                steps, guidance,
-                reference_image, control_image2
-            ]
-        ).then(
-            fn=lambda pid: 'canny',  # Forzar el processor_id correcto
-            outputs=[processor_id]
-        ).then(
-            fn=update_preprocessing,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
-            outputs=[reference_image]
-        )
-        
         depth_btn.click(
+            # Primero actualizamos solo los colores de los botones
+            fn=lambda: (
+                gr.Button.update(variant="primary"),    # canny
+                gr.Button.update(variant="secondary"),  # depth
+                gr.Button.update(variant="primary"),    # redux
+            ),
+            outputs=[canny_btn, depth_btn, redux_btn]
+        ).then(
+            # Luego hacemos el resto del procesamiento
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "depth", use_hyper, img, lt, ht, dr, ir, debug, pid
             ),
@@ -1100,7 +1103,6 @@ def on_ui_tabs():
                 detect_resolution, image_resolution, debug, processor_id
             ],
             outputs=[
-                canny_btn, depth_btn, redux_btn,
                 low_threshold, high_threshold, detect_resolution, image_resolution,
                 processor_id, reference_scale,
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
@@ -1108,35 +1110,55 @@ def on_ui_tabs():
                 steps, guidance,
                 reference_image, control_image2
             ]
-        ).then(
-            # Forzar actualización del processor_id antes del preprocesamiento
-            fn=lambda: None,
-            inputs=None,
-            outputs=None,
-            queue=False
-        ).then(
-            fn=flux_tab.preprocess_image,
-            inputs=[
-                input_image, 
-                low_threshold, 
-                high_threshold, 
-                detect_resolution, 
-                image_resolution, 
-                debug, 
-                processor_id  # Usar el valor actualizado
-            ],
-            outputs=[reference_image]
         )
         
+        # Manejador para el botón de Canny
+        canny_btn.click(
+            # Primero actualizamos solo los colores de los botones
+            fn=lambda: (
+                gr.Button.update(variant="secondary"),  # canny
+                gr.Button.update(variant="primary"),    # depth
+                gr.Button.update(variant="primary"),    # redux
+            ),
+            outputs=[canny_btn, depth_btn, redux_btn]
+        ).then(
+            # Luego hacemos el resto del procesamiento
+            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
+                "canny", use_hyper, img, lt, ht, dr, ir, debug, pid
+            ),
+            inputs=[
+                use_hyper_flux, input_image, low_threshold, high_threshold,
+                detect_resolution, image_resolution, debug, processor_id
+            ],
+            outputs=[
+                low_threshold, high_threshold, detect_resolution, image_resolution,
+                processor_id, reference_scale,
+                prompt_embeds_scale_1, prompt_embeds_scale_2,
+                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
+                steps, guidance,
+                reference_image, control_image2
+            ]
+        )
+
+        # Manejador para el botón de Redux
         redux_btn.click(
+            # Primero actualizamos solo los colores de los botones
+            fn=lambda: (
+                gr.Button.update(variant="primary"),    # canny
+                gr.Button.update(variant="primary"),    # depth
+                gr.Button.update(variant="secondary"),  # redux
+            ),
+            outputs=[canny_btn, depth_btn, redux_btn]
+        ).then(
+            # Luego hacemos el resto del procesamiento
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "redux", use_hyper, img, lt, ht, dr, ir, debug, pid
             ),
             inputs=[
-                use_hyper_flux, input_image, debug, processor_id
+                use_hyper_flux, input_image, low_threshold, high_threshold,
+                detect_resolution, image_resolution, debug, processor_id
             ],
             outputs=[
-                canny_btn, depth_btn, redux_btn,
                 low_threshold, high_threshold, detect_resolution, image_resolution,
                 processor_id, reference_scale,
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
@@ -1145,6 +1167,7 @@ def on_ui_tabs():
                 reference_image, control_image2
             ]
         )
+
 
     return [(flux_interface, "Flux.1 Tools", "flux_controlnet_tab")]
 
