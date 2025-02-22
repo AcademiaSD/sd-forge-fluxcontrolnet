@@ -194,7 +194,7 @@ class FluxControlNetTab:
         self.current_model = "flux1-Canny-Dev_FP8.safetensors"
         self.checkpoint_path = "./models/Stable-diffusion/"
         self.output_dir = "./outputs/fluxcontrolnet/"
-        
+        #self.default_image_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png" 
         self.default_processor_id = "depth_zoe"
         self.logger = LogManager()
         settings = load_settings()
@@ -207,8 +207,8 @@ class FluxControlNetTab:
             
         
             
-        print("self.output_dir", self.output_dir)
-        print("self.checkpoint_path", self.checkpoint_path)
+        #print("self.output_dir", self.output_dir)
+        #print("self.checkpoint_path", self.checkpoint_path)
 
     def update_model_path(self, new_path, debug_enabled):
         if new_path and os.path.exists(new_path):
@@ -387,9 +387,20 @@ class FluxControlNetTab:
                     raise ValueError("Failed to create PIL Image")
                 return image
             #default_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png"
-            if not os.path.exists(default_path):
-                raise FileNotFoundError(f"Default image not found at {default_path}")
-            return load_image(default_path)
+            
+            #if os.path.exists(default_path):
+            #    return load_image(default_path)
+            
+            # Crear imagen blanca si no existe el archivo
+            #white_image = Image.new('RGB', (512, 512), color='white')
+            
+            #return white_image
+            
+            #return load_image(default_path)
+            
+            #if not os.path.exists(default_path):
+            #    raise FileNotFoundError(f"Default image not found at {default_path}")
+            #return load_image(default_path)
         except Exception as e:
             self.logger.log(f"Error loading control image: {str(e)}")
             return Image.new('RGB', (512, 512), color='white')
@@ -578,18 +589,19 @@ def on_ui_tabs():
             input_image = gr.Image(label="Control Image", source="upload", type="numpy", interactive=True)
             control_image2 = gr.Image(label="Control Image 2", source="upload", type="numpy", interactive=True, visible=False)
             reference_image = gr.Image(label="Reference Image", type="pil", interactive=False)
-            output_gallery = gr.Gallery(label="Generated Images", type="pil", elem_id="generated_image", show_label=True, interactive=True)
+            output_gallery = gr.Gallery(label="Generated Images ", type="pil", elem_id="generated_image", show_label=True, interactive=False)
+            selected_image = gr.State() 
               
         with gr.Row():
             
             with gr.Column(scale=1):
                 get_dimensions_btn = gr.Button("Get Image Dimensions")
             with gr.Column(scale=1):
-                use_default = gr.Button("Use Default Image")
+                use_default = gr.Button("Use Default", visible=False)
             with gr.Column(scale=1):
                 preprocess_btn = gr.Button("Run Preprocessor", variant="secondary", visible=True)
             with gr.Column(scale=1):
-                send_to_control_btn = gr.Button("Send to Control Image", variant="secondary")
+                send_to_control_btn = gr.Button("Send to Control", variant="secondary", visible=False)
             with gr.Column(scale=1):    
                 generate_btn = gr.Button("Generate", variant="primary")
       
@@ -597,14 +609,14 @@ def on_ui_tabs():
             with gr.Column(scale=5):
                 prompt = gr.Textbox(label="Prompt", placeholder="Enter your prompt here...")
             with gr.Column(scale=0.1):  # Este column ocupará 1/5 del espacio
-                use_hyper_flux = gr.Checkbox(label="Use Hyper-FLUX.1 LoRA", value=True)
+                use_hyper_flux = gr.Checkbox(label="Use LoRA Hyper-FLUX1", value=False)
             with gr.Column(scale=0.1):
                 batch = gr.Slider(label="Batch :", minimum=1, maximum=100, value=1, step=1)
                
         with gr.Row():
             width = gr.Slider(label="Width :", minimum=256, maximum=2048, value=1024, step=16)
             height = gr.Slider(label="Height :", minimum=256, maximum=2048, value=1024, step=16)
-            steps = gr.Slider(label="Inference Steps :", minimum=1, maximum=100, value=8, step=1)
+            steps = gr.Slider(label="Inference_Steps :", minimum=1, maximum=100, value=30, step=1)
             guidance = gr.Slider(label="Guidance_Scale:", minimum=1, maximum=100, value=30, step=0.1)
             with gr.Row():
                 seed = gr.Slider(label="Seed_Value :", minimum=0, maximum=9999999999, value=0, step=1)
@@ -772,8 +784,11 @@ def on_ui_tabs():
             else:
                 control_image2_update = gr.update(visible=True)
                 
+            
+                
             if mode == "canny":
-                default_steps = 8 if use_hyper_flux else 30
+                
+                default_steps = 30 if not use_hyper_flux else 8
                 ctrl_updates = [
                     gr.update(visible=True),    # low_threshold
                     gr.update(visible=True),    # high_threshold
@@ -792,7 +807,7 @@ def on_ui_tabs():
                     control_image2_update
                 ]
             elif mode == "depth":
-                default_steps = 8 if use_hyper_flux else 30
+                default_steps = 30 if not use_hyper_flux else 8
                 ctrl_updates = [
                     gr.update(visible=False),   # low_threshold
                     gr.update(visible=False),   # high_threshold
@@ -811,7 +826,7 @@ def on_ui_tabs():
                     control_image2_update
                 ]
             elif mode == "redux":
-                default_steps = 8 if use_hyper_flux else 30
+                default_steps = 30 if not use_hyper_flux else 8
                 ctrl_updates = [
                     gr.update(visible=False),   # low_threshold
                     gr.update(visible=False),   # high_threshold
@@ -884,6 +899,7 @@ def on_ui_tabs():
             outputs=[checkpoint_path]
         )
         use_hyper_flux.change(
+        
             fn=lambda x: gr.update(value=8 if x else 30),
             inputs=[use_hyper_flux],
             outputs=[steps]
@@ -972,18 +988,27 @@ def on_ui_tabs():
             inputs=[output_gallery],
             outputs=[output_gallery, generate_btn]
         )
+        
+        output_gallery.select(
+            fn=lambda evt: evt,  # Captura la imagen seleccionada
+            outputs=[selected_image]
+        )
+        
         send_to_control_btn.click(
             #fn=lambda generated: generated,
             #inputs=[output_gallery],
             #outputs=[input_image]
-            output_gallery.select(
-            fn=lambda evt: evt,
-            inputs=[output_gallery],
+        #    output_gallery.select(
+        #    fn=lambda evt: evt,
+        #    inputs=[output_gallery],
+        #    outputs=[input_image]
+            fn=lambda img: img,
+            inputs=[selected_image],
             outputs=[input_image]
-)
+        
         )
         
-      
+#)      
         canny_btn.click(
             fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
                 "canny", use_hyper, img, lt, ht, dr, ir, debug, pid
@@ -1047,6 +1072,7 @@ def on_ui_tabs():
                 reference_image, control_image2
             ]
         )
+
     return [(flux_interface, "Flux.1 Tools", "flux_controlnet_tab")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
