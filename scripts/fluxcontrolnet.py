@@ -320,25 +320,25 @@ class FluxControlNetTab:
             return None
 
     def load_models(self, use_hyper_flux=True, debug_enabled=False):  #Text_encoders + vae
-        debug_print("\nIniciando carga de modelos...", debug_enabled)
+        debug_print("\nStarting model loading...", debug_enabled)
         dtype = torch.bfloat16
         
-        debug_print("\nCargando CLIP text encoder...", debug_enabled)
+        debug_print("\nLoading CLIP text encoder...", debug_enabled)
         text_encoder = CLIPTextModel.from_pretrained(
             self.model_path, subfolder="text_encoder", torch_dtype=dtype
         )
         
-        debug_print("\nCargando T5 text encoder...", debug_enabled)
+        debug_print("\nLoading T5 text encoder...", debug_enabled)
         text_encoder_2 = T5EncoderModel.from_pretrained(
             self.model_path, subfolder="text_encoder_2", torch_dtype=dtype
         )
         
-        debug_print("\nCargando VAE...", debug_enabled)
+        debug_print("\nLoading VAE...", debug_enabled)
         vae = AutoencoderKL.from_pretrained(
             self.model_path, subfolder="vae", torch_dtype=dtype
         )
       
-        debug_print("\nCargando tokenizers...", debug_enabled)
+        debug_print("\nLoading tokenizers...", debug_enabled)
         tokenizer = CLIPTokenizer.from_pretrained(self.model_path, subfolder="tokenizer")
         tokenizer_2 = T5Tokenizer.from_pretrained(self.model_path, subfolder="tokenizer_2")
         
@@ -394,22 +394,22 @@ class FluxControlNetTab:
                 pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
                 pipe.fuse_lora(lora_scale=0.125)
         
-        debug_print("\nCuantizando transformer principal...", debug_enabled)
+        debug_print("\nQuantizing main transformer...", debug_enabled)
         pipe.transformer = quantize_model_to_nf4(pipe.transformer, "Transformer principal", debug_enabled)
         
-        debug_print("\nActivando optimizaciones de memoria...", debug_enabled)
+        debug_print("\nEnabling memory optimizations...", debug_enabled)
         if hasattr(torch.backends, 'memory_efficient_attention'):
             torch.backends.memory_efficient_attention.enabled = True
-            debug_print("Memory efficient attention activado", debug_enabled)
+            debug_print("Memory efficient attention enabled", debug_enabled)
         
         pipe.enable_attention_slicing()
-        debug_print("Attention slicing activado", debug_enabled)
+        debug_print("Attention slicing enabled", debug_enabled)
         
         pipe.enable_model_cpu_offload()
-        debug_print("Model CPU offload activado", debug_enabled)
+        debug_print("Model CPU offload enabled", debug_enabled)
         
         clear_memory(debug_enabled)
-        debug_print("\nModelos cargados y optimizados correctamente", debug_enabled)
+        debug_print("\nModels loaded and optimized correctly", debug_enabled)
         return pipe
 
     def load_control_image(self, input_image):
@@ -486,25 +486,22 @@ class FluxControlNetTab:
             if self.current_processor == "redux":
                 control_image = control_image 
                 control_image2 = control_image2
-            
+                
             if randomize_seed:
                 seed = random.randint(0, 999999999)
             seed_value = int(seed) if seed is not None else 0
             
-            debug_print(f"\nGenerando con parametros:", debug_enabled)
-            debug_print(f"Width: {width}", debug_enabled)
-            debug_print(f"Height: {height}", debug_enabled)
-            debug_print(f"Steps: {steps}", debug_enabled)
-            debug_print(f"Orientation Scale: {guidance}", debug_enabled)
-            debug_print(f"Low Threshold: {low_threshold}", debug_enabled)
-            debug_print(f"High Threshold: {high_threshold}", debug_enabled)
-            debug_print(f"Detect Resolution: {detect_resolution}", debug_enabled)
-            debug_print(f"Image Resolution: {image_resolution}", debug_enabled)
-            debug_print(f"Seed: {seed_value}", debug_enabled)
-            debug_print(f"Prompt: {prompt}", debug_enabled)
+            # Log inicial de parámetros
+            #self.logger.log("\nIniciando generación con parámetros:")
+            #self.logger.log(f"Width: {width}")
+            #self.logger.log(f"Height: {height}")
+            #self.logger.log(f"Steps: {steps}")
+            #self.logger.log(f"Guidance Scale: {guidance}")
+            #self.logger.log(f"Seed: {seed_value}")
             
             if self.current_processor == "canny":
                 with torch.inference_mode():
+                    self.logger.log("Starting generation process...")
                     result = self.pipe(
                         prompt=prompt,
                         control_image=control_image,
@@ -512,22 +509,26 @@ class FluxControlNetTab:
                         width=width,
                         num_inference_steps=int(steps),
                         guidance_scale=guidance,
-                        generator=torch.Generator("cpu").manual_seed(seed_value),
+                        generator=torch.Generator("cpu").manual_seed(seed_value)
                     )
-            if self.current_processor == "depth":
-                with torch.inference_mode():
-                    result = self.pipe(
-                        prompt=prompt,
-                        control_image=control_image,
-                        height=height,
-                        width=width,
-                        num_inference_steps=int(steps),
-                        guidance_scale=guidance,
-                        generator=torch.Generator("cpu").manual_seed(seed_value),
-                    )
-            
+                    self.logger.log("Generation completed")
                     
-            if self.current_processor == "redux":
+            elif self.current_processor == "depth":
+                with torch.inference_mode():
+                    self.logger.log("Starting generation process...")
+                    result = self.pipe(
+                        prompt=prompt,
+                        control_image=control_image,
+                        height=height,
+                        width=width,
+                        num_inference_steps=int(steps),
+                        guidance_scale=guidance,
+                        generator=torch.Generator("cpu").manual_seed(seed_value)
+                    )
+                    self.logger.log("Generation completed")
+            
+            elif self.current_processor == "redux":
+                self.logger.log("Starting Redux process...")
                 pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
                     "black-forest-labs/FLUX.1-Redux-dev",
                     text_encoder=self.pipe.text_encoder,
@@ -541,11 +542,13 @@ class FluxControlNetTab:
                 my_prompt2 = prompt
                 
                 if control_image2 is not None:
+                    self.logger.log("Processing two images...")
                     pipe_prior_output = pipe_prior_redux([control_image, control_image2], 
                                                         prompt=[my_prompt, my_prompt2],
                                                         prompt_embeds_scale=[prompt_embeds_scale_1, prompt_embeds_scale_2],
                                                         pooled_prompt_embeds_scale=[pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2])
                 else:
+                    self.logger.log("Processing one image...")
                     pipe_prior_output = pipe_prior_redux(control_image, prompt=my_prompt, prompt_embeds_scale=[prompt_embeds_scale_1],
                                                         pooled_prompt_embeds_scale=[pooled_prompt_embeds_scale_1])
                 
@@ -564,6 +567,7 @@ class FluxControlNetTab:
                 joint_attention_kwargs = dict(attention_mask=attention_mask)
                 
                 with torch.inference_mode():
+                    self.logger.log("Generating final image...")
                     result = self.pipe(
                         guidance_scale=guidance,
                         num_inference_steps=int(steps),
@@ -571,15 +575,13 @@ class FluxControlNetTab:
                         joint_attention_kwargs=joint_attention_kwargs,
                         **pipe_prior_output,
                     )
+                    self.logger.log("Generation completed")
             
-            debug_print("\nGeneracion completada", debug_enabled)
+            debug_print("\nGeneration completed", debug_enabled)
             clear_memory(debug_enabled)
 
-            # Get the value from the output_dir Textbox
-            
-            #output_directory = output_dir.value if hasattr(output_dir, 'value') else str(output_dir)
+            # Guardar la imagen
             output_directory = self.output_dir
-            
             os.makedirs(output_directory, exist_ok=True)
             timestamp = datetime.now().strftime("%y_%m_%d")
             mode_map = {
@@ -592,11 +594,11 @@ class FluxControlNetTab:
             
             result_image = result.images[0]
             result_image.save(file_path)
-            self.logger.log(f"Imagen guardada en: {file_path}")
+            self.logger.log(f"Image saved in: {file_path}")
             return result.images[0]
             
         except Exception as e:
-            self.logger.log(f"\nError en la generacion: {str(e)}")
+            self.logger.log(f"\nError in generation: {str(e)}")
             self.logger.log("Stacktrace:" + traceback.format_exc())
             return None
 
@@ -613,10 +615,21 @@ def on_ui_tabs():
     #with gr.Blocks(analytics_enabled=False) as flux_interface:
     with gr.Blocks() as flux_interface:
         with gr.Row():
+            extension_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            logo_path = os.path.join('file=', extension_path, 'assets', 'logo.png')
+
             gr.HTML(
-                """
+                f"""
                 <div style="text-align: center; max-width: 650px; margin: 0 auto">
-                    <h3>Flux.1 Tools ControlNet by Academia SD</h3>
+                    <h3 style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+                        Flux.1 Tools ControlNet by Academia SD
+                        <img src="file={logo_path}" style="height: 32px; width: auto;">
+                        <a href="https://www.youtube.com/@Academia_SD" target="_blank" style="text-decoration: none; display: flex; align-items: center;">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="red">
+                                <path d="M19.615 3.184c-3.604-.246-11.631-.245-15.23 0-3.897.266-4.356 2.62-4.385 8.816.029 6.185.484 8.549 4.385 8.816 3.6.245 11.626.246 15.23 0 3.897-.266 4.356-2.62 4.385-8.816-.029-6.185-.484-8.549-4.385-8.816zm-10.615 12.816v-8l8 3.993-8 4.007z"/>
+                            </svg>
+                        </a>
+                    </h3>
                 </div>
                 """
             )
@@ -644,7 +657,7 @@ def on_ui_tabs():
                             image = image[:, :, :3]  # Convertir a RGB
                     return image
                 except Exception as e:
-                    print(f"Error al cargar la imagen: {str(e)}")
+                    print(f"Error loading image: {str(e)}")
                     return None
 
         # Luego definimos el componente input_image con los parámetros mejorados
@@ -678,22 +691,30 @@ def on_ui_tabs():
             
             with gr.Column(scale=1):
                 get_dimensions_btn = gr.Button("Get Image Dimensions")
-            with gr.Column(scale=1):
+            with gr.Column(scale=0.1):
                 use_default = gr.Button("Use Default", visible=False)
             with gr.Column(scale=1):
                 preprocess_btn = gr.Button("Run Preprocessor", variant="secondary", visible=True)
-            with gr.Column(scale=1):
+            with gr.Column(scale=0.1):
                 send_to_control_btn = gr.Button("Send to Control", variant="secondary", visible=False)
+                batch = gr.Slider(label="Batch :", minimum=1, maximum=100, value=1, step=1)
             with gr.Column(scale=1):    
                 generate_btn = gr.Button("Generate", variant="primary")
       
         with gr.Row():
-            with gr.Column(scale=5):
+            with gr.Column(scale=3):
                 prompt = gr.Textbox(label="Prompt", placeholder="Enter your prompt here...")
-            with gr.Column(scale=0.1):  # Este column ocupará 1/5 del espacio
+            with gr.Column(scale=1):  
                 use_hyper_flux = gr.Checkbox(label="Use LoRA Hyper-FLUX1", value=False)
-            with gr.Column(scale=0.1):
-                batch = gr.Slider(label="Batch :", minimum=1, maximum=100, value=1, step=1)
+            with gr.Column(scale=1):
+                
+                progress_bar = gr.Textbox(
+                    label="Progress", 
+                    value="", 
+                    interactive=False,
+                    show_label=True,
+                    visible=True
+                )
                
         with gr.Row():
             width = gr.Slider(label="Width :", minimum=256, maximum=2048, value=1024, step=16)
@@ -973,7 +994,7 @@ def on_ui_tabs():
                     return img.copy()
                 return img
             except Exception as e:
-                print(f"Error en la carga de imagen: {e}")
+                print(f"Error loading image: {e}")
                 return None
 
         # Separar el evento de carga del evento de preprocesamiento
@@ -1091,7 +1112,14 @@ def on_ui_tabs():
         ):
             try:
                 results = []
+                # Primer update con lista vacía e inicialización del progreso
+                yield results, flux_tab.logger.log("Starting batch generation..."), "Starting..."
+                
                 for i in range(int(batch)):
+                    # Actualizar progreso de batch
+                    batch_progress = f"Processing image {i+1} of {batch}"
+                    yield results, flux_tab.logger.log(batch_progress), batch_progress
+                    
                     local_seed = random.randint(0, 999999999) if randomize_seed else seed
                     result = flux_tab.generate(
                         prompt=prompt,
@@ -1123,14 +1151,29 @@ def on_ui_tabs():
                         control_image2=control_image2,
                         output_dir=output_dir
                     )
+                    
                     if result is not None:
                         results.append(result)
-                log_text = flux_tab.logger.log("Completed!")
-                return results, log_text
+                        # Actualizar galería y progreso después de cada imagen generada
+                        complete_msg = f"Image {i+1}/{batch} completed"
+                        yield results, flux_tab.logger.log(complete_msg), complete_msg
+                
+                # Mensaje final
+                final_msg = "Batch generation completed!"
+                yield results, flux_tab.logger.log(final_msg), final_msg
+        
             except Exception as e:
-                error_msg = f"Error during generation: {str(e)}"
-                log_text = flux_tab.logger.log(error_msg)
-                return None, log_text
+                error_msg = f"Error in generation: {str(e)}"
+                yield None, flux_tab.logger.log(error_msg), "Error: " + str(e)
+                
+        #progress_bar = gr.Textbox(
+        #    label="Progress", 
+        #    value="", 
+        #    interactive=False,
+        #    show_label=True,
+        #    visible=True
+        #)
+
         generate_btn.click(
             fn=pre_generate,
             inputs=None,
@@ -1144,12 +1187,15 @@ def on_ui_tabs():
                 prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
                 pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
             ],
-            outputs=[output_gallery, log_box],
+            outputs=[output_gallery, log_box, progress_bar],
+            show_progress=True
         ).then(
             fn=post_generate,
             inputs=[output_gallery],
             outputs=[output_gallery, generate_btn]
         )
+        
+        #------------------
         
         output_gallery.select(
             fn=lambda evt: evt,  # Captura la imagen seleccionada
