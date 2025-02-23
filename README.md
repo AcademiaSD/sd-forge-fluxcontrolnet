@@ -38,10 +38,10 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > Download checkpoints and move to folder models/stable-diffusion
 >
 > - For Redux
-> [https://civitai.com/models/1264072/flux1-dev-fp8 ](https://huggingface.co/Academia-SD/flux1-Dev-FP8/tree/main)
+>   https://civitai.com/models/1264072/flux1-dev-fp8 (https://huggingface.co/Academia-SD/flux1-Dev-FP8/tree/main)
 >
 > - For Canny 
-> [https://civitai.com/models/1263977/flux1-canny-dev-fp8](https://huggingface.co/Academia-SD/flux1-Canny-Dev-FP8/tree/main)
+>   https://civitai.com/models/1263977/flux1-canny-dev-fp8(https://huggingface.co/Academia-SD/flux1-Canny-Dev-FP8/tree/main)
 >
 > - For Depth
-> [https://civitai.com/models/1264100/flux1-depth-dev-fp8](https://huggingface.co/Academia-SD/flux1-Depth-Dev-FP8/tree/main)
+>   https://civitai.com/models/1264100/flux1-depth-dev-fp8(https://huggingface.co/Academia-SD/flux1-Depth-Dev-FP8/tree/main)
