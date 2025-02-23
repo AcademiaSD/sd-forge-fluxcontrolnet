@@ -1,4 +1,4 @@
-# sd-forge-fluxcontrolnet
+# Flux.1 Tools ControlNet Extension (sd-forge-fluxcontrolnet)
 This is an implementation to use Canny, Depth, and Redux Flux1.dev ControlNet Forge WebUI Extension by [@AcademiaSD](https://github.com/AcademiaSD?tab=repositories)
 
 ## For Forge WebUI and ComfyUI tutorials
