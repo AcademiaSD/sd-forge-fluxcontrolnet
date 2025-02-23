@@ -29,11 +29,6 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > 
 > You can download the requirements_versions.txt file for easier installation: https://drive.google.com/file/d/1nEpklfF7Ppflcq5HGFS9NI__ZfKmg-Yg/view?usp=sharing
 
-## Set HF Access Token
-> [!IMPORTANT] 
->
-> Also needs a huggingface access token: Sign up / log in, go to your profile, create an access token. Read type is all you need, avoid the much more complicated Fine-grained option. Copy the token. Make a textfile called huggingface_access_token.txt in the main webui folder, e.g. {forge install directory}\webui, and paste the token in there. You will also need to accept the terms on the Flux1 Dev repositories pages.
-
 
 ## Downloads
 > [!NOTE]  
