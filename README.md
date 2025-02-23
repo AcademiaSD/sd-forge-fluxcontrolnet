@@ -26,6 +26,7 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > controlnet-aux>=0.0.9,
 > 
 > Forge2 already has newer versions for all but diffusers. Be aware that updates to Forge2 may overwrite the requirements file.
+> You can download the requirements_versions.txt file for easier installation: https://drive.google.com/file/d/1nEpklfF7Ppflcq5HGFS9NI__ZfKmg-Yg/view?usp=sharing
 
 ## Set HF Access Token
 > [!IMPORTANT] 
