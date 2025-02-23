@@ -530,7 +530,7 @@ class FluxControlNetTab:
             elif self.current_processor == "redux":
                 self.logger.log("Starting Redux process...")
                 pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
-                    "black-forest-labs/FLUX.1-Redux-dev",
+                    "Runware/FLUX.1-Redux-dev",
                     text_encoder=self.pipe.text_encoder,
                     text_encoder_2=self.pipe.text_encoder_2,
                     tokenizer=self.pipe.tokenizer,
@@ -713,8 +713,10 @@ def on_ui_tabs():
                     value="", 
                     interactive=False,
                     show_label=True,
+                    show_progress=True,
                     visible=True
                 )
+
                
         with gr.Row():
             width = gr.Slider(label="Width :", minimum=256, maximum=2048, value=1024, step=16)
@@ -1112,15 +1114,21 @@ def on_ui_tabs():
         ):
             try:
                 results = []
-                # Primer update con lista vacía e inicialización del progreso
-                yield results, flux_tab.logger.log("Starting batch generation..."), "Starting..."
+                total_batch = int(batch)
                 
-                for i in range(int(batch)):
-                    # Actualizar progreso de batch
-                    batch_progress = f"Processing image {i+1} of {batch}"
-                    yield results, flux_tab.logger.log(batch_progress), batch_progress
+                # Inicialización
+                status_msg = "Starting generation..."
+                yield results, flux_tab.logger.log(status_msg), status_msg
+                
+                for i in range(total_batch):
+                    # Actualizar progreso actual
+                    status_msg = f"Generating image {i+1} of {total_batch}"
+                    yield results, flux_tab.logger.log(status_msg), status_msg
                     
+                    # Generar seed local para esta imagen
                     local_seed = random.randint(0, 999999999) if randomize_seed else seed
+                    
+                    # Generar la imagen
                     result = flux_tab.generate(
                         prompt=prompt,
                         input_image=input_image,
@@ -1154,17 +1162,18 @@ def on_ui_tabs():
                     
                     if result is not None:
                         results.append(result)
-                        # Actualizar galería y progreso después de cada imagen generada
-                        complete_msg = f"Image {i+1}/{batch} completed"
-                        yield results, flux_tab.logger.log(complete_msg), complete_msg
-                
+                        # Solo actualizamos cuando la imagen se ha generado exitosamente
+                        status_msg = f"Completed {i+1} of {total_batch} images"
+                        yield results, flux_tab.logger.log(status_msg), status_msg
+                    
                 # Mensaje final
-                final_msg = "Batch generation completed!"
+                final_msg = "Generation completed successfully!"
                 yield results, flux_tab.logger.log(final_msg), final_msg
-        
+                
             except Exception as e:
                 error_msg = f"Error in generation: {str(e)}"
-                yield None, flux_tab.logger.log(error_msg), "Error: " + str(e)
+                print(error_msg)  # Para debugging
+                yield None, flux_tab.logger.log(error_msg), error_msg
                 
         #progress_bar = gr.Textbox(
         #    label="Progress", 
@@ -1173,6 +1182,7 @@ def on_ui_tabs():
         #    show_label=True,
         #    visible=True
         #)
+
 
         generate_btn.click(
             fn=pre_generate,
@@ -1188,7 +1198,7 @@ def on_ui_tabs():
                 pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
             ],
             outputs=[output_gallery, log_box, progress_bar],
-            show_progress=True
+            show_progress=True  # Esto mantiene el indicador de ventana activa
         ).then(
             fn=post_generate,
             inputs=[output_gallery],
