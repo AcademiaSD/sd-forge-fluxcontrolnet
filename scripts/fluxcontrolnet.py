@@ -234,19 +234,22 @@ class FluxControlNetTab:
         new_visible = not visible        
         button_text = "🙈 Hide" if new_visible else "👁️ Show"
 
-        # Limpiar estado anterior y forzar la ventana correcta según el modo
         if self.current_processor == "redux":
-            reference_image_update = gr.update(visible=False, value=None, interactive=False)
+            reference_image_update = gr.update(visible=False)
             control_image2_update = gr.update(visible=new_visible, interactive=True)
+            # El prompt2 sigue el estado de visibilidad de control_image2
+            prompt2_update = gr.update(visible=new_visible)
         else:
             reference_image_update = gr.update(visible=new_visible, interactive=False)
             control_image2_update = gr.update(visible=False, value=None, interactive=False)
+            prompt2_update = gr.update(visible=False)
 
         return (
             new_visible,
             reference_image_update,
             control_image2_update,
-            gr.Button.update(value=button_text, variant="primary")
+            gr.Button.update(value=button_text, variant="primary"),
+            prompt2_update
         )
 
     def update_model_path(self, new_path, debug_enabled):
@@ -467,7 +470,7 @@ class FluxControlNetTab:
             return Image.new('RGB', (512, 512), color='white')
 
     def generate(
-        self, prompt, input_image, width, height, steps, guidance, 
+        self, prompt, prompt2, input_image, width, height, steps, guidance, 
         low_threshold, high_threshold, detect_resolution, image_resolution, 
         reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
         prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1, 
@@ -505,15 +508,7 @@ class FluxControlNetTab:
             if randomize_seed:
                 seed = random.randint(0, 999999999)
             seed_value = int(seed) if seed is not None else 0
-            
-            # Log inicial de parámetros
-            #self.logger.log("\nIniciando generación con parámetros:")
-            #self.logger.log(f"Width: {width}")
-            #self.logger.log(f"Height: {height}")
-            #self.logger.log(f"Steps: {steps}")
-            #self.logger.log(f"Guidance Scale: {guidance}")
-            #self.logger.log(f"Seed: {seed_value}")
-            
+                
             if self.current_processor == "canny":
                 with torch.inference_mode():
                     self.logger.log("Starting generation process...")
@@ -527,7 +522,7 @@ class FluxControlNetTab:
                         generator=torch.Generator("cpu").manual_seed(seed_value)
                     )
                     self.logger.log("Generation completed")
-                    
+                        
             elif self.current_processor == "depth":
                 with torch.inference_mode():
                     self.logger.log("Starting generation process...")
@@ -541,21 +536,21 @@ class FluxControlNetTab:
                         generator=torch.Generator("cpu").manual_seed(seed_value)
                     )
                     self.logger.log("Generation completed")
-            
+                
             elif self.current_processor == "redux":
                 self.logger.log("Starting Redux process...")
                 pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
-                    "Runware/FLUX.1-Redux-dev",
+                    "black-forest-labs/FLUX.1-Redux-dev",
                     text_encoder=self.pipe.text_encoder,
                     text_encoder_2=self.pipe.text_encoder_2,
                     tokenizer=self.pipe.tokenizer,
                     tokenizer_2=self.pipe.tokenizer_2,
                     torch_dtype=torch.bfloat16
                 ).to("cuda")
-                
+                    
                 my_prompt = prompt
-                my_prompt2 = prompt
-                
+                my_prompt2 = prompt2 if prompt2 else prompt  # Aseguramos que prompt2 tenga un valor
+                    
                 if control_image2 is not None:
                     self.logger.log("Processing two images...")
                     pipe_prior_output = pipe_prior_redux([control_image, control_image2], 
@@ -701,7 +696,19 @@ def on_ui_tabs():
                 every=1
             )
             reference_image = gr.Image(label="Reference Image", type="pil", interactive=False)
-            output_gallery = gr.Gallery(label="Generated Images ", type="pil", elem_id="generated_image", show_label=True, interactive=False)
+            output_gallery = gr.Gallery(
+                label="Generated Images", 
+                type="pil", 
+                elem_id="generated_image", 
+                show_label=True, 
+                interactive=False,
+                object_fit="contain",
+                columns=1,
+                rows=1,
+                #height=768,
+                #width=768
+            )
+            
             selected_image = gr.State() 
               
         with gr.Row():
@@ -722,11 +729,12 @@ def on_ui_tabs():
       
         with gr.Row():
             with gr.Column(scale=3):
-                prompt = gr.Textbox(label="Prompt", placeholder="Enter your prompt here...")
+                with gr.Row():
+                    prompt = gr.Textbox(label="Prompt", placeholder="Enter your prompt here...", scale=1)
+                    prompt2 = gr.Textbox(label="Prompt for 2nd Image", placeholder="Enter prompt for second image...", visible=False, scale=1)
             with gr.Column(scale=1):  
                 use_hyper_flux = gr.Checkbox(label="Use LoRA Hyper-FLUX1", value=False)
             with gr.Column(scale=1):
-                
                 progress_bar = gr.Textbox(
                     label="Progress", 
                     value="", 
@@ -743,7 +751,7 @@ def on_ui_tabs():
             steps = gr.Slider(label="Inference_Steps :", minimum=1, maximum=100, value=30, step=1)
             guidance = gr.Slider(label="Guidance_Scale:", minimum=1, maximum=100, value=30, step=0.1)
             with gr.Row():
-                seed = gr.Slider(label="Seed_Value :", minimum=0, maximum=9999999999, value=0, step=1)
+                seed = gr.Number(label="Seed :", minimum=0, maximum=999999999, value=0, step=1)
                 randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
         with gr.Row():
             low_threshold = gr.Slider(label="Low Threshold:", minimum=0, maximum=256, value=50, step=1, visible=True)
@@ -904,104 +912,95 @@ def on_ui_tabs():
         def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, reference_visible):
             flux_tab.update_processor_and_model(mode)
             
-            if mode == "depth":
-                new_processor_id = 'depth_zoe'
-            elif mode == "canny":
-                new_processor_id = 'canny'
-            else:
-                new_processor_id = None
-
-            processed_image = None
-            if input_image is not None and mode != "redux":
-                try:
-                    if mode == "depth":
-                        processor = Processor('depth_zoe')
-                        temp_image = flux_tab.load_control_image(input_image)
-                        processed_image = processor(temp_image)
-                    elif mode == "canny":
-                        processor = CannyDetector()
-                        temp_image = flux_tab.load_control_image(input_image)
-                        processed_image = processor(
-                            temp_image,
-                            low_threshold=int(low_threshold),
-                            high_threshold=int(high_threshold),
-                            detect_resolution=int(detect_resolution),
-                            image_resolution=int(image_resolution)
-                        )
-                    
-                    if processed_image is not None:
-                        processed_image = np.array(processed_image)
-                except Exception as e:
-                    print(f"Error en preprocesamiento: {str(e)}")
-                    processed_image = None
-
             button_text = "🙈 Hide" if reference_visible else "👁️ Show"
-
+            
+            # Procesamos la imagen si existe una imagen de entrada
+            processed_image = None
+            if input_image is not None:
+                if mode == "canny":
+                    processor = CannyDetector()
+                    temp_image = flux_tab.load_control_image(input_image)
+                    processed_image = processor(
+                        temp_image,
+                        low_threshold=int(low_threshold),
+                        high_threshold=int(high_threshold),
+                        detect_resolution=int(detect_resolution),
+                        image_resolution=int(image_resolution)
+                    )
+                elif mode == "depth":
+                    processor = Processor('depth_zoe')
+                    temp_image = flux_tab.load_control_image(input_image)
+                    processed_image = processor(temp_image)
+                    
+            # Convertimos el resultado a numpy array si es necesario
+            if processed_image is not None and not isinstance(processed_image, np.ndarray):
+                processed_image = np.array(processed_image)
+            
             if mode == "redux":
                 ctrl_updates = [
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=True),    
-                    gr.update(visible=True),    
-                    gr.update(visible=True),    
-                    gr.update(visible=True),    
-                    gr.update(visible=True),    
-                    gr.update(value=30 if not use_hyper_flux else 8),  
-                    gr.update(value=3.5),       
-                    gr.update(visible=False, value=None),   
-                    gr.update(visible=reference_visible),
-                    gr.update(visible=reference_visible),
-                    gr.Button.update(value=button_text, variant="primary")
+                    gr.update(visible=False),   # low_threshold
+                    gr.update(visible=False),   # high_threshold
+                    gr.update(visible=False),   # detect_resolution
+                    gr.update(visible=False),   # image_resolution
+                    gr.update(visible=False),   # processor_id
+                    gr.update(visible=True),    # reference_scale
+                    gr.update(visible=True),    # prompt_embeds_scale_1
+                    gr.update(visible=True),    # prompt_embeds_scale_2
+                    gr.update(visible=True),    # pooled_prompt_embeds_scale_1
+                    gr.update(visible=True),    # pooled_prompt_embeds_scale_2
+                    gr.update(value=30 if not use_hyper_flux else 8),  # steps
+                    gr.update(value=3.5),       # guidance
+                    gr.update(visible=False),   # reference_image
+                    gr.update(visible=reference_visible),    # control_image2
+                    gr.update(visible=reference_visible),    # prompt2 - ahora sigue el estado de reference_visible
+                    gr.Button.update(value=button_text, variant="primary")  # toggle_button
                 ]
             elif mode == "canny":
                 ctrl_updates = [
-                    gr.update(visible=True),   
-                    gr.update(visible=True),   
-                    gr.update(visible=True),  
-                    gr.update(visible=True),   
-                    gr.update(visible=False),  
-                    gr.update(visible=False),   
-                    gr.update(visible=False),    
-                    gr.update(visible=False),    
-                    gr.update(visible=False),    
-                    gr.update(visible=False),   
-                    gr.update(value=30 if not use_hyper_flux else 8),  
-                    gr.update(value=30),        
-                    gr.update(value=processed_image, visible=reference_visible),  
-                    gr.update(visible=False, value=None), 
-                    gr.update(visible=False, value=None),
-                    gr.Button.update(value=button_text, variant="primary")
+                    gr.update(visible=True),    # low_threshold
+                    gr.update(visible=True),    # high_threshold
+                    gr.update(visible=True),    # detect_resolution
+                    gr.update(visible=True),    # image_resolution
+                    gr.update(visible=False),   # processor_id
+                    gr.update(visible=False),   # reference_scale
+                    gr.update(visible=False),   # prompt_embeds_scale_1
+                    gr.update(visible=False),   # prompt_embeds_scale_2
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
+                    gr.update(value=30 if not use_hyper_flux else 8),  # steps
+                    gr.update(value=30),        # guidance
+                    gr.update(value=processed_image, visible=reference_visible),  # reference_image
+                    gr.update(visible=False),   # control_image2
+                    gr.update(visible=False),   # prompt2
+                    gr.Button.update(value=button_text, variant="primary")  # toggle_button
                 ]
             else:  # depth
                 ctrl_updates = [
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=False),   
-                    gr.update(visible=True, value='depth_zoe'),  
-                    gr.update(visible=False),   
-                    gr.update(visible=False),    
-                    gr.update(visible=False),    
-                    gr.update(visible=False),    
-                    gr.update(visible=False),    
-                    gr.update(value=30 if not use_hyper_flux else 8),  
-                    gr.update(value=30),       
-                    gr.update(value=processed_image, visible=reference_visible), 
-                    gr.update(visible=False, value=None),  
-                    gr.update(visible=False, value=None),
-                    gr.Button.update(value=button_text, variant="primary")
+                    gr.update(visible=False),   # low_threshold
+                    gr.update(visible=False),   # high_threshold
+                    gr.update(visible=False),   # detect_resolution
+                    gr.update(visible=False),   # image_resolution
+                    gr.update(visible=True, value='depth_zoe'),  # processor_id
+                    gr.update(visible=False),   # reference_scale
+                    gr.update(visible=False),   # prompt_embeds_scale_1
+                    gr.update(visible=False),   # prompt_embeds_scale_2
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
+                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
+                    gr.update(value=30 if not use_hyper_flux else 8),  # steps
+                    gr.update(value=30),        # guidance
+                    gr.update(value=processed_image, visible=reference_visible),  # reference_image
+                    gr.update(visible=False),   # control_image2
+                    gr.update(visible=False),   # prompt2
+                    gr.Button.update(value=button_text, variant="primary")  # toggle_button
                 ]
 
             button_updates = [
                 gr.Button.update(variant="secondary" if mode == "canny" else "primary"),
                 gr.Button.update(variant="secondary" if mode == "depth" else "primary"),
-                gr.Button.update(variant="secondary" if mode == "redux" else "primary"),
+                gr.Button.update(variant="secondary" if mode == "redux" else "primary")
             ]
 
-            return ctrl_updates + button_updates 
+            return ctrl_updates + button_updates
                     
             
         def safe_load_image(img):
@@ -1122,9 +1121,9 @@ def on_ui_tabs():
             return gr.Button.update(value="Generating...", variant="secondary", interactive=False)
         def post_generate(result):
             return result, gr.Button.update(value="Generate", variant="primary", interactive=True)
-        # Se ha modificado la función generate_with_state para quitar los parámetros innecesarios
+        
         def generate_with_state(
-            prompt, input_image, width, height, steps, guidance,
+            prompt, prompt2, input_image, width, height, steps, guidance,
             low_threshold, high_threshold, detect_resolution, image_resolution,
             reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
             prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
@@ -1132,23 +1131,23 @@ def on_ui_tabs():
         ):
             try:
                 results = []
-                total_batch = int(batch)
+                total_batch = int(batch) if batch is not None else 1
                 
-                # Inicialización
                 status_msg = "Starting generation..."
-                yield results, flux_tab.logger.log(status_msg), status_msg
+                yield results, flux_tab.logger.log(status_msg), status_msg, gr.update()
                 
                 for i in range(total_batch):
-                    # Actualizar progreso actual
-                    status_msg = f"Generating image {i+1} of {total_batch}"
-                    yield results, flux_tab.logger.log(status_msg), status_msg
                     
-                    # Generar seed local para esta imagen
                     local_seed = random.randint(0, 999999999) if randomize_seed else seed
+                    
+                    
+                    status_msg = f"Generating image {i+1} of {total_batch} with seed: {local_seed}"
+                    yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=local_seed)
                     
                     # Generar la imagen
                     result = flux_tab.generate(
                         prompt=prompt,
+                        prompt2=prompt2,
                         input_image=input_image,
                         width=width,
                         height=height,
@@ -1180,18 +1179,16 @@ def on_ui_tabs():
                     
                     if result is not None:
                         results.append(result)
-                        # Solo actualizamos cuando la imagen se ha generado exitosamente
                         status_msg = f"Completed {i+1} of {total_batch} images"
-                        yield results, flux_tab.logger.log(status_msg), status_msg
-                    
-                # Mensaje final
+                        yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=local_seed)
+                
                 final_msg = "Generation completed successfully!"
-                yield results, flux_tab.logger.log(final_msg), final_msg
+                yield results, flux_tab.logger.log(final_msg), final_msg, gr.update()
                 
             except Exception as e:
                 error_msg = f"Error in generation: {str(e)}"
-                print(error_msg)  # Para debugging
-                yield None, flux_tab.logger.log(error_msg), error_msg
+                print(error_msg)
+                yield None, flux_tab.logger.log(error_msg), error_msg, gr.update()
                 
 
 #----------------------------
@@ -1201,7 +1198,7 @@ def on_ui_tabs():
         toggle_reference_btn.click(
             fn=flux_tab.toggle_reference_visibility,
             inputs=[reference_visible, gr.State(flux_tab.current_processor)],
-            outputs=[reference_visible, reference_image, control_image2, toggle_reference_btn]
+            outputs=[reference_visible, reference_image, control_image2, toggle_reference_btn, prompt2]
         )
 
         generate_btn.click(
@@ -1211,14 +1208,14 @@ def on_ui_tabs():
         ).then(
             fn=generate_with_state,
             inputs=[
-                prompt, input_image, width, height, steps, guidance,
+                prompt, prompt2, input_image, width, height, steps, guidance,
                 low_threshold, high_threshold, detect_resolution, image_resolution,
                 reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
                 prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
                 pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
             ],
-            outputs=[output_gallery, log_box, progress_bar],
-            show_progress=True  # Esto mantiene el indicador de ventana activa
+            outputs=[output_gallery, log_box, progress_bar, seed],  # Agregamos seed a los outputs
+            show_progress=True
         ).then(
             fn=post_generate,
             inputs=[output_gallery],
@@ -1260,7 +1257,7 @@ def on_ui_tabs():
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
                 pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
                 steps, guidance,
-                reference_image, control_image2, control_image2,
+                reference_image, control_image2, prompt2,
                 toggle_reference_btn,  # Añadido toggle_reference_btn
                 canny_btn, depth_btn, redux_btn
             ]
@@ -1280,7 +1277,7 @@ def on_ui_tabs():
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
                 pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
                 steps, guidance,
-                reference_image, control_image2, control_image2,
+                reference_image, control_image2, prompt2,
                 toggle_reference_btn,  # Añadido toggle_reference_btn
                 canny_btn, depth_btn, redux_btn
             ]
@@ -1300,8 +1297,8 @@ def on_ui_tabs():
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
                 pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
                 steps, guidance,
-                reference_image, control_image2, control_image2,
-                toggle_reference_btn,  # Añadido toggle_reference_btn
+                reference_image, control_image2, prompt2,  # Asegurarnos que prompt2 está incluido
+                toggle_reference_btn,
                 canny_btn, depth_btn, redux_btn
             ]
         )
