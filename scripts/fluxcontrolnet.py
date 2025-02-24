@@ -496,7 +496,7 @@ class FluxControlNetTab:
                 )
             if self.current_processor == "depth":
                 menupro = "depth"
-                processor_id = 'depth_zoe'
+                #processor_id = 'depth_zoe'
                 processor = Processor(processor_id)
                 control_image = processor(
                     control_image, 
