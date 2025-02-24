@@ -233,20 +233,21 @@ class FluxControlNetTab:
     def toggle_reference_visibility(self, visible, current_processor):
         new_visible = not visible        
         button_text = "🙈 Hide" if new_visible else "👁️ Show"
-        if current_processor == "redux":
-            return (
-                new_visible,
-                gr.update(visible=False),
-                gr.update(visible=new_visible),
-                gr.Button.update(value=button_text, variant="primary")
-            )
+
+        # Limpiar estado anterior y forzar la ventana correcta según el modo
+        if self.current_processor == "redux":
+            reference_image_update = gr.update(visible=False, value=None, interactive=False)
+            control_image2_update = gr.update(visible=new_visible, interactive=True)
         else:
-            return (
-                new_visible,
-                gr.update(visible=new_visible),
-                gr.update(visible=False),
-                gr.Button.update(value=button_text, variant="primary")
-            )
+            reference_image_update = gr.update(visible=new_visible, interactive=False)
+            control_image2_update = gr.update(visible=False, value=None, interactive=False)
+
+        return (
+            new_visible,
+            reference_image_update,
+            control_image2_update,
+            gr.Button.update(value=button_text, variant="primary")
+        )
 
     def update_model_path(self, new_path, debug_enabled):
         if new_path and os.path.exists(new_path):
@@ -901,9 +902,8 @@ def on_ui_tabs():
                 outputs=[width, height]
             )
         def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, reference_visible):
-            
             flux_tab.update_processor_and_model(mode)
-
+            
             if mode == "depth":
                 new_processor_id = 'depth_zoe'
             elif mode == "canny":
@@ -937,76 +937,68 @@ def on_ui_tabs():
 
             button_text = "🙈 Hide" if reference_visible else "👁️ Show"
 
-            if mode != "redux":
-                control_image2_update = gr.update(value=None, visible=False)
-            else:
-                control_image2_update = gr.update(visible=reference_visible)
-
-            if mode == "canny":
-                default_steps = 30 if not use_hyper_flux else 8
+            if mode == "redux":
                 ctrl_updates = [
-                    gr.update(visible=True),    # low_threshold
-                    gr.update(visible=True),    # high_threshold
-                    gr.update(visible=True),    # detect_resolution
-                    gr.update(visible=True),    # image_resolution
-                    gr.update(visible=False),   # processor_id dropdown
-                    gr.update(visible=False),   # reference_scale
-                    gr.update(visible=False),   # prompt_embeds_scale_1
-                    gr.update(visible=False),   # prompt_embeds_scale_2
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
-                    gr.update(value=default_steps),  # steps
-                    gr.update(value=30),        # guidance
-                    gr.update(value=processed_image, visible=reference_visible, interactive=False),  # reference_image
-                    gr.update(visible=False),   # control_image2
-                    control_image2_update,      # control_image2 update
-                    gr.Button.update(variant="primary", value=button_text)  # toggle_reference_btn
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=True),    
+                    gr.update(visible=True),    
+                    gr.update(visible=True),    
+                    gr.update(visible=True),    
+                    gr.update(visible=True),    
+                    gr.update(value=30 if not use_hyper_flux else 8),  
+                    gr.update(value=3.5),       
+                    gr.update(visible=False, value=None),   
+                    gr.update(visible=reference_visible),
+                    gr.update(visible=reference_visible),
+                    gr.Button.update(value=button_text, variant="primary")
                 ]
-            elif mode == "depth":
-                default_steps = 30 if not use_hyper_flux else 8
+            elif mode == "canny":
                 ctrl_updates = [
-                    gr.update(visible=False),   # low_threshold
-                    gr.update(visible=False),   # high_threshold
-                    gr.update(visible=False),   # detect_resolution
-                    gr.update(visible=False),   # image_resolution
-                    gr.update(visible=True, value='depth_zoe'),  # processor_id dropdown
-                    gr.update(visible=False),   # reference_scale
-                    gr.update(visible=False),   # prompt_embeds_scale_1
-                    gr.update(visible=False),   # prompt_embeds_scale_2
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
-                    gr.update(value=default_steps),  # steps
-                    gr.update(value=30),        # guidance
-                    gr.update(value=processed_image, visible=reference_visible, interactive=False),  # reference_image
-                    gr.update(visible=False),   # control_image2
-                    control_image2_update,      # control_image2 update
-                    gr.Button.update(variant="primary", value=button_text)  # toggle_reference_btn
+                    gr.update(visible=True),   
+                    gr.update(visible=True),   
+                    gr.update(visible=True),  
+                    gr.update(visible=True),   
+                    gr.update(visible=False),  
+                    gr.update(visible=False),   
+                    gr.update(visible=False),    
+                    gr.update(visible=False),    
+                    gr.update(visible=False),    
+                    gr.update(visible=False),   
+                    gr.update(value=30 if not use_hyper_flux else 8),  
+                    gr.update(value=30),        
+                    gr.update(value=processed_image, visible=reference_visible),  
+                    gr.update(visible=False, value=None), 
+                    gr.update(visible=False, value=None),
+                    gr.Button.update(value=button_text, variant="primary")
                 ]
-            else:  # redux
-                default_steps = 30 if not use_hyper_flux else 8
+            else:  # depth
                 ctrl_updates = [
-                    gr.update(visible=False),   # low_threshold
-                    gr.update(visible=False),   # high_threshold
-                    gr.update(visible=False),   # detect_resolution
-                    gr.update(visible=False),   # image_resolution
-                    gr.update(visible=False),   # processor_id dropdown
-                    gr.update(visible=True),    # reference_scale
-                    gr.update(visible=True),    # prompt_embeds_scale_1
-                    gr.update(visible=True),    # prompt_embeds_scale_2
-                    gr.update(visible=True),    # pooled_prompt_embeds_scale_1
-                    gr.update(visible=True),    # pooled_prompt_embeds_scale_2
-                    gr.update(value=default_steps),  # steps
-                    gr.update(value=3.5),       # guidance
-                    gr.update(visible=False),   # reference_image
-                    gr.update(visible=reference_visible),  # control_image2
-                    control_image2_update,      # control_image2 update
-                    gr.Button.update(variant="primary", value=button_text)  # toggle_reference_btn
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=False),   
+                    gr.update(visible=True, value='depth_zoe'),  
+                    gr.update(visible=False),   
+                    gr.update(visible=False),    
+                    gr.update(visible=False),    
+                    gr.update(visible=False),    
+                    gr.update(visible=False),    
+                    gr.update(value=30 if not use_hyper_flux else 8),  
+                    gr.update(value=30),       
+                    gr.update(value=processed_image, visible=reference_visible), 
+                    gr.update(visible=False, value=None),  
+                    gr.update(visible=False, value=None),
+                    gr.Button.update(value=button_text, variant="primary")
                 ]
 
             button_updates = [
-                gr.Button.update(variant="secondary" if mode == "canny" else "primary"),    # canny_btn
-                gr.Button.update(variant="secondary" if mode == "depth" else "primary"),    # depth_btn
-                gr.Button.update(variant="secondary" if mode == "redux" else "primary"),    # redux_btn
+                gr.Button.update(variant="secondary" if mode == "canny" else "primary"),
+                gr.Button.update(variant="secondary" if mode == "depth" else "primary"),
+                gr.Button.update(variant="secondary" if mode == "redux" else "primary"),
             ]
 
             return ctrl_updates + button_updates 
