@@ -496,7 +496,7 @@ class FluxControlNetTab:
                 )
             if self.current_processor == "depth":
                 menupro = "depth"
-                #processor_id = 'depth_zoe'
+                processor_id = 'depth_zoe'
                 processor = Processor(processor_id)
                 control_image = processor(
                     control_image, 
@@ -540,7 +540,7 @@ class FluxControlNetTab:
             elif self.current_processor == "redux":
                 self.logger.log("Starting Redux process...")
                 pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
-                    "black-forest-labs/FLUX.1-Redux-dev",
+                    "Runware/FLUX.1-Redux-dev",
                     text_encoder=self.pipe.text_encoder,
                     text_encoder_2=self.pipe.text_encoder_2,
                     tokenizer=self.pipe.tokenizer,
