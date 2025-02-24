@@ -230,9 +230,23 @@ class FluxControlNetTab:
             self.output_dir = "./outputs/fluxcontrolnet/"
             
         
-            
-        #print("self.output_dir", self.output_dir)
-        #print("self.checkpoint_path", self.checkpoint_path)
+    def toggle_reference_visibility(self, visible, current_processor):
+        new_visible = not visible        
+        button_text = "🙈 Hide" if new_visible else "👁️ Show"
+        if current_processor == "redux":
+            return (
+                new_visible,
+                gr.update(visible=False),
+                gr.update(visible=new_visible),
+                gr.Button.update(value=button_text, variant="primary")
+            )
+        else:
+            return (
+                new_visible,
+                gr.update(visible=new_visible),
+                gr.update(visible=False),
+                gr.Button.update(value=button_text, variant="primary")
+            )
 
     def update_model_path(self, new_path, debug_enabled):
         if new_path and os.path.exists(new_path):
@@ -642,6 +656,8 @@ def on_ui_tabs():
             with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
                 redux_btn = gr.Button("Redux", variant="primary")    
             gr.Column(scale=2) 
+            
+        reference_visible = gr.State(value=True)
 
         with gr.Row():
             
@@ -688,18 +704,20 @@ def on_ui_tabs():
             selected_image = gr.State() 
               
         with gr.Row():
-            
             with gr.Column(scale=1):
-                get_dimensions_btn = gr.Button("Get Image Dimensions")
-            with gr.Column(scale=0.1):
-                use_default = gr.Button("Use Default", visible=False)
+                get_dimensions_btn = gr.Button("📐 Get Image Dimensions")
             with gr.Column(scale=1):
-                preprocess_btn = gr.Button("Run Preprocessor", variant="secondary", visible=True)
+               
+                preprocess_btn = gr.Button("💥 Run Preprocessor", variant="secondary", visible=True)
+            with gr.Column(scale=1):
+                toggle_reference_btn = gr.Button("🙈 Hide", variant="primary", interactive=True)
+                
             with gr.Column(scale=0.1):
                 send_to_control_btn = gr.Button("Send to Control", variant="secondary", visible=False)
                 batch = gr.Slider(label="Batch :", minimum=1, maximum=100, value=1, step=1)
             with gr.Column(scale=1):    
-                generate_btn = gr.Button("Generate", variant="primary")
+                generate_btn = gr.Button("⚡ Generate", variant="primary")
+                
       
         with gr.Row():
             with gr.Column(scale=3):
@@ -882,11 +900,10 @@ def on_ui_tabs():
                 inputs=[input_image, width, height],
                 outputs=[width, height]
             )
-        def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
-            # Actualizar el modelo
-            flux_tab.update_processor_and_model(mode)
+        def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, reference_visible):
             
-            # Forzar el processor_id según el modo
+            flux_tab.update_processor_and_model(mode)
+
             if mode == "depth":
                 new_processor_id = 'depth_zoe'
             elif mode == "canny":
@@ -894,7 +911,6 @@ def on_ui_tabs():
             else:
                 new_processor_id = None
 
-            # Realizar el preprocesamiento si hay una imagen
             processed_image = None
             if input_image is not None and mode != "redux":
                 try:
@@ -919,12 +935,13 @@ def on_ui_tabs():
                     print(f"Error en preprocesamiento: {str(e)}")
                     processed_image = None
 
+            button_text = "🙈 Hide" if reference_visible else "👁️ Show"
+
             if mode != "redux":
                 control_image2_update = gr.update(value=None, visible=False)
             else:
-                control_image2_update = gr.update(visible=True)
+                control_image2_update = gr.update(visible=reference_visible)
 
-            # Configurar actualizaciones de UI
             if mode == "canny":
                 default_steps = 30 if not use_hyper_flux else 8
                 ctrl_updates = [
@@ -940,9 +957,10 @@ def on_ui_tabs():
                     gr.update(visible=False),   # pooled_prompt_embeds_scale_2
                     gr.update(value=default_steps),  # steps
                     gr.update(value=30),        # guidance
-                    gr.update(value=processed_image, visible=True, interactive=False),  # reference_image
+                    gr.update(value=processed_image, visible=reference_visible, interactive=False),  # reference_image
                     gr.update(visible=False),   # control_image2
-                    control_image2_update
+                    control_image2_update,      # control_image2 update
+                    gr.Button.update(variant="primary", value=button_text)  # toggle_reference_btn
                 ]
             elif mode == "depth":
                 default_steps = 30 if not use_hyper_flux else 8
@@ -959,9 +977,10 @@ def on_ui_tabs():
                     gr.update(visible=False),   # pooled_prompt_embeds_scale_2
                     gr.update(value=default_steps),  # steps
                     gr.update(value=30),        # guidance
-                    gr.update(value=processed_image, visible=True, interactive=False),  # reference_image
+                    gr.update(value=processed_image, visible=reference_visible, interactive=False),  # reference_image
                     gr.update(visible=False),   # control_image2
-                    control_image2_update
+                    control_image2_update,      # control_image2 update
+                    gr.Button.update(variant="primary", value=button_text)  # toggle_reference_btn
                 ]
             else:  # redux
                 default_steps = 30 if not use_hyper_flux else 8
@@ -979,27 +998,34 @@ def on_ui_tabs():
                     gr.update(value=default_steps),  # steps
                     gr.update(value=3.5),       # guidance
                     gr.update(visible=False),   # reference_image
-                    gr.update(visible=True),    # control_image2
-                    control_image2_update
+                    gr.update(visible=reference_visible),  # control_image2
+                    control_image2_update,      # control_image2 update
+                    gr.Button.update(variant="primary", value=button_text)  # toggle_reference_btn
                 ]
 
-            return ctrl_updates
+            button_updates = [
+                gr.Button.update(variant="secondary" if mode == "canny" else "primary"),    # canny_btn
+                gr.Button.update(variant="secondary" if mode == "depth" else "primary"),    # depth_btn
+                gr.Button.update(variant="secondary" if mode == "redux" else "primary"),    # redux_btn
+            ]
+
+            return ctrl_updates + button_updates 
                     
             
         def safe_load_image(img):
             try:
                 if img is None:
                     return None
-                # Asegurarnos de que la imagen esté en el formato correcto
+                
                 if isinstance(img, np.ndarray):
-                    # Hacer una copia para evitar problemas de memoria compartida
+                    
                     return img.copy()
                 return img
             except Exception as e:
                 print(f"Error loading image: {e}")
                 return None
 
-        # Separar el evento de carga del evento de preprocesamiento
+        
         input_image.upload(
             fn=safe_load_image,
             inputs=[input_image],
@@ -1008,13 +1034,13 @@ def on_ui_tabs():
         )
         
         control_image2.upload(
-            fn=safe_load_image,  # Usa la misma función safe_load_image
+            fn=safe_load_image, 
             inputs=[control_image2],
             outputs=[control_image2],
             queue=False
         )
         
-        # Evento separado para el preprocesamiento
+        
         input_image.change(
             fn=flux_tab.preprocess_image,
             inputs=[
@@ -1175,14 +1201,16 @@ def on_ui_tabs():
                 print(error_msg)  # Para debugging
                 yield None, flux_tab.logger.log(error_msg), error_msg
                 
-        #progress_bar = gr.Textbox(
-        #    label="Progress", 
-        #    value="", 
-        #    interactive=False,
-        #    show_label=True,
-        #    visible=True
-        #)
 
+#----------------------------
+
+        
+        # Evento click para el botón de alternar
+        toggle_reference_btn.click(
+            fn=flux_tab.toggle_reference_visibility,
+            inputs=[reference_visible, gr.State(flux_tab.current_processor)],
+            outputs=[reference_visible, reference_image, control_image2, toggle_reference_btn]
+        )
 
         generate_btn.click(
             fn=pre_generate,
@@ -1225,52 +1253,14 @@ def on_ui_tabs():
             outputs=[input_image]
         
         )
-        
-#)      
-        depth_btn.click(
-            # Primero actualizamos solo los colores de los botones
-            fn=lambda: (
-                gr.Button.update(variant="primary"),    # canny
-                gr.Button.update(variant="secondary"),  # depth
-                gr.Button.update(variant="primary"),    # redux
-            ),
-            outputs=[canny_btn, depth_btn, redux_btn]
-        ).then(
-            # Luego hacemos el resto del procesamiento
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
-                "depth", use_hyper, img, lt, ht, dr, ir, debug, pid
-            ),
-            inputs=[
-                use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id
-            ],
-            outputs=[
-                low_threshold, high_threshold, detect_resolution, image_resolution,
-                processor_id, reference_scale,
-                prompt_embeds_scale_1, prompt_embeds_scale_2,
-                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
-                steps, guidance,
-                reference_image, control_image2
-            ]
-        )
-        
-        # Manejador para el botón de Canny
+            
         canny_btn.click(
-            # Primero actualizamos solo los colores de los botones
-            fn=lambda: (
-                gr.Button.update(variant="secondary"),  # canny
-                gr.Button.update(variant="primary"),    # depth
-                gr.Button.update(variant="primary"),    # redux
-            ),
-            outputs=[canny_btn, depth_btn, redux_btn]
-        ).then(
-            # Luego hacemos el resto del procesamiento
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
-                "canny", use_hyper, img, lt, ht, dr, ir, debug, pid
+            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis: on_processor_change(
+                "canny", use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis
             ),
             inputs=[
                 use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id
+                detect_resolution, image_resolution, debug, processor_id, reference_visible
             ],
             outputs=[
                 low_threshold, high_threshold, detect_resolution, image_resolution,
@@ -1278,27 +1268,19 @@ def on_ui_tabs():
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
                 pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
                 steps, guidance,
-                reference_image, control_image2
+                reference_image, control_image2, control_image2,
+                toggle_reference_btn,  # Añadido toggle_reference_btn
+                canny_btn, depth_btn, redux_btn
             ]
         )
 
-        # Manejador para el botón de Redux
-        redux_btn.click(
-            # Primero actualizamos solo los colores de los botones
-            fn=lambda: (
-                gr.Button.update(variant="primary"),    # canny
-                gr.Button.update(variant="primary"),    # depth
-                gr.Button.update(variant="secondary"),  # redux
-            ),
-            outputs=[canny_btn, depth_btn, redux_btn]
-        ).then(
-            # Luego hacemos el resto del procesamiento
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid: on_processor_change(
-                "redux", use_hyper, img, lt, ht, dr, ir, debug, pid
+        depth_btn.click(
+            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis: on_processor_change(
+                "depth", use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis
             ),
             inputs=[
                 use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id
+                detect_resolution, image_resolution, debug, processor_id, reference_visible
             ],
             outputs=[
                 low_threshold, high_threshold, detect_resolution, image_resolution,
@@ -1306,7 +1288,29 @@ def on_ui_tabs():
                 prompt_embeds_scale_1, prompt_embeds_scale_2,
                 pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
                 steps, guidance,
-                reference_image, control_image2
+                reference_image, control_image2, control_image2,
+                toggle_reference_btn,  # Añadido toggle_reference_btn
+                canny_btn, depth_btn, redux_btn
+            ]
+        )
+
+        redux_btn.click(
+            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis: on_processor_change(
+                "redux", use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis
+            ),
+            inputs=[
+                use_hyper_flux, input_image, low_threshold, high_threshold,
+                detect_resolution, image_resolution, debug, processor_id, reference_visible
+            ],
+            outputs=[
+                low_threshold, high_threshold, detect_resolution, image_resolution,
+                processor_id, reference_scale,
+                prompt_embeds_scale_1, prompt_embeds_scale_2,
+                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
+                steps, guidance,
+                reference_image, control_image2, control_image2,
+                toggle_reference_btn,  # Añadido toggle_reference_btn
+                canny_btn, depth_btn, redux_btn
             ]
         )
 
