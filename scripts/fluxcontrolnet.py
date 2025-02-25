@@ -723,7 +723,7 @@ def on_ui_tabs():
                 
             with gr.Column(scale=0.1):
                 send_to_control_btn = gr.Button("Send to Control", variant="secondary", visible=False)
-                batch = gr.Slider(label="Batch :", minimum=1, maximum=100, value=1, step=1)
+                batch = gr.Slider(label=" Batch :", minimum=1, maximum=100, value=1, step=1)
             with gr.Column(scale=1):    
                 generate_btn = gr.Button("⚡ Generate", variant="primary")
                 
@@ -737,7 +737,7 @@ def on_ui_tabs():
                 use_hyper_flux = gr.Checkbox(label="Use LoRA Hyper-FLUX1", value=False)
             with gr.Column(scale=1):
                 progress_bar = gr.Textbox(
-                    label="Progress", 
+                    label=" Progress:", 
                     value="", 
                     interactive=False,
                     show_label=True,
@@ -821,6 +821,7 @@ def on_ui_tabs():
                     paste_button=paste_button, tabname=paste_tabname, source_tabname=None, source_image_component=output_gallery,
                     paste_field_names=[]
                 ))
+                
         with gr.Accordion("Advanced Settings", open=False):
             with gr.Row():
                 with gr.Column(scale=5):
