@@ -213,7 +213,8 @@ def save_settings(checkpoints_path, output_dir, debug_enabled=False):
 class FluxControlNetTab:
     def __init__(self):
         self.pipe = None
-        self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4"
+        #self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4"
+        self.model_path = "./models/diffusers/text_encoders_FP8"
         self.current_processor = "canny"
         self.current_model = "flux1-Canny-Dev_FP8.safetensors"
         self.checkpoint_path = "./models/Stable-diffusion/"
