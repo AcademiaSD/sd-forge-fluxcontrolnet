@@ -10,7 +10,7 @@ You can follow and see Spanish videos tutorials (English IA Dub and English Subt
 Go to the Extensions tab > Install from URL > URL for this repository.
 
 ## Supports
-✅ CUDA GPUs (tested with GPUs of 12GB VRAM, should work with 8GB VRAM).
+✅ CUDA GPUs (tested with GPUs of 12GB VRAM, should work with 8GB VRAM) and probably Mac support.
 
 ✅ Custom LoRa Support
 
