@@ -13,6 +13,7 @@ import numpy as np
 from controlnet_aux import CannyDetector
 from controlnet_aux.processor import Processor
 import os
+import glob
 from modules import script_callbacks
 from modules.ui_components import ToolButton
 import modules.generation_parameters_copypaste as parameters_copypaste
@@ -25,11 +26,29 @@ from collections import deque
 from huggingface_hub import login
 import threading
 import json
-import os
 import io
 import logging
 import sys
 from h11._util import LocalProtocolError
+
+import torch
+
+# Verificar CUDA (GPU NVIDIA)
+has_cuda = torch.cuda.is_available()
+
+# Verificar MPS (GPU Apple M1/M2/M3)
+has_mps = hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available') and torch.mps.is_available()
+
+# Determinar el mejor dispositivo disponible
+if has_cuda:
+    device = torch.device("cuda")
+elif has_mps:
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
+
+# Usar el dispositivo seleccionado
+
 
 class CustomErrorFilter(logging.Filter):
     def filter(self, record):
@@ -86,15 +105,53 @@ pooled_prompt_embeds_scale_2 = 1.0
 checkpoint_path = "./models/Stable-diffusion/"
 current_model = "flux1-Canny-Dev_FP8.safetensors"
 
+def list_lora_files(lora_dir="./models/lora/"):
+    if not os.path.exists(lora_dir):
+        os.makedirs(lora_dir, exist_ok=True)
+        
+    lora_files = []
+    # Recorrer todas las subcarpetas
+    for root, dirs, files in os.walk(lora_dir):
+        for file in files:
+            if file.endswith('.safetensors'):
+                # Calcular la ruta relativa respecto a lora_dir
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, lora_dir)
+                lora_files.append(rel_path)
+                
+    return ["None"] + sorted(lora_files)
+
 def debug_print(message, debug_enabled=False):
     if debug_enabled:
         print(message)
+        
+def create_generator(seed_value):
+    """Crea un generador compatible con el dispositivo actual."""
+    if device.type == "cuda" and torch.cuda.is_available():
+        return torch.Generator(device="cuda").manual_seed(seed_value)
+    elif device.type == "mps" and hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available') and torch.mps.is_available():
+        # MPS no soporta generadores directamente, usamos el de CPU
+        return torch.Generator("cpu").manual_seed(seed_value)
+    else:
+        return torch.Generator("cpu").manual_seed(seed_value)
 
 def print_memory_usage(message="", debug_enabled=False):
-    if debug_enabled and torch.cuda.is_available():
+    if not debug_enabled:
+        return
+        
+    if device.type == "cuda" and torch.cuda.is_available():
         allocated = torch.cuda.memory_allocated() / 1024**2
         reserved = torch.cuda.memory_reserved() / 1024**2
         print(f"{message} GPU Memory: {allocated:.2f}MB allocated, {reserved:.2f}MB reserved")
+    elif device.type == "mps" and hasattr(torch, 'mps') and hasattr(torch.mps, 'is_available') and torch.mps.is_available():
+        # MPS (Metal Performance Shaders para Apple Silicon) tiene diferentes APIs
+        if hasattr(torch.mps, 'current_allocated_memory'):
+            allocated = torch.mps.current_allocated_memory() / 1024**2
+            print(f"{message} MPS Memory: {allocated:.2f}MB allocated")
+        else:
+            print(f"{message} MPS Memory: usage stats unavailable")
+    elif device.type == "cpu":
+        print(f"{message} Using CPU (no memory statistics available)")
 
 def quantize_model_to_nf4(model, name="", debug_enabled=False):
     debug_print(f"\nQuantizing model {name} t...", debug_enabled)
@@ -128,9 +185,17 @@ def quantize_model_to_nf4(model, name="", debug_enabled=False):
 
 def clear_memory(debug_enabled=False):
     debug_print("\nEmptying memory", debug_enabled)
-    if torch.cuda.is_available():
+    if device.type == "cuda" and torch.cuda.is_available():
         print_memory_usage("Before cleaning:", debug_enabled)
         torch.cuda.empty_cache()
+        gc.collect()
+    elif device.type == "mps" and hasattr(torch, 'mps') and torch.mps.is_available():
+        # MPS también puede necesitar limpieza específica
+        gc.collect()
+        if hasattr(torch.mps, 'empty_cache'):
+            torch.mps.empty_cache()
+    else:
+        # Para CPU, solo podemos hacer la recolección de basura
         gc.collect()
 
 def update_dimensions(image, width_slider, height_slider):
@@ -162,18 +227,16 @@ def load_settings():
         # Valores por defecto
         settings = {
             "checkpoint_path": "./models/Stable-diffusion/",
-            "output_dir": "./outputs/fluxcontrolnet/"
+            "output_dir": "./outputs/fluxcontrolnet/",
+            "lora_dir": "./models/lora/"  # Valor por defecto para loras
         }
         
         if os.path.exists(config_path):
-
             with open(config_path, 'r') as f:
                 loaded_settings = json.load(f)
-
                 settings.update(loaded_settings)
         
         return settings
-        
         
     except Exception as e:
         print(f"Error loading settings: {str(e)}")
@@ -190,25 +253,24 @@ def save_settingsHF(hf_token_value):
     except Exception as e:
         return f"Error saving HF Token: {str(e)}"
 
-def save_settings(checkpoints_path, output_dir, debug_enabled=False):
+def save_settings(checkpoints_path, output_dir, lora_dir, debug_enabled=False):
     try:
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         extension_dir = os.path.join(root_dir, "extensions", "sd-forge-fluxcontrolnet", "utils")
         os.makedirs(extension_dir, exist_ok=True)
         config_path = os.path.join(extension_dir, "extension_config.txt")
         config = {
-            "checkpoint_path": checkpoints_path,  # Clave corregida
-            "output_dir": output_dir
+            "checkpoint_path": checkpoints_path,
+            "output_dir": output_dir,
+            "lora_dir": lora_dir
         }
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
         log_message = "Settings file saved"
-        # Return all three expected values: log message and both path values
-        return log_message, checkpoints_path, output_dir
+        return log_message, checkpoints_path, output_dir, lora_dir
     except Exception as e:
         error_message = f"Error saving settings file: {str(e)}"
-        # In case of error, still return all three expected values
-        return error_message, checkpoints_path, output_dir
+        return error_message, checkpoints_path, output_dir, lora_dir
         
 class FluxControlNetTab:
     def __init__(self):
@@ -219,16 +281,35 @@ class FluxControlNetTab:
         self.current_model = "flux1-Canny-Dev_FP8.safetensors"
         self.checkpoint_path = "./models/Stable-diffusion/"
         self.output_dir = "./outputs/fluxcontrolnet/"
+        self.lora_dir = "./models/lora/"  # Añadimos la ruta de loras
         #self.default_image_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png" 
         self.default_processor_id = "depth_zoe"
         self.logger = LogManager()
+        # Atributos para los LoRAs
+        self.lora1_model = None
+        self.lora1_scale = 1.0
+        self.lora2_model = None
+        self.lora2_scale = 1.0
+        self.lora3_model = None
+        self.lora3_scale = 1.0
+        # Atributos para rastrear el estado del pipeline
+        self.loaded_processor = None
+        self.loaded_hyper_flux = None
+        self.loaded_lora1 = None
+        self.loaded_lora1_scale = None
+        self.loaded_lora2 = None
+        self.loaded_lora2_scale = None
+        self.loaded_lora3 = None
+        self.loaded_lora3_scale = None
         settings = load_settings()
         if settings:
             self.checkpoint_path = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             self.output_dir = settings.get("output_dir", "./outputs/fluxcontrolnet/")
+            self.lora_dir = settings.get("lora_dir", "./models/lora/")  # Cargar la ruta de loras
         else:
             self.checkpoint_path = "./models/Stable-diffusion/"
             self.output_dir = "./outputs/fluxcontrolnet/"
+            self.lora_dir = "./models/lora/"
             
         
     def toggle_reference_visibility(self, visible, current_processor):
@@ -399,6 +480,37 @@ class FluxControlNetTab:
             if use_hyper_flux:
                 pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
                 pipe.fuse_lora(lora_scale=0.125)
+            
+            # Cargar LoRAs adicionales para Canny y Depth
+            try:
+                if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
+                    lora1_path = os.path.join(self.lora_dir, self.lora1_model)
+                    if os.path.exists(lora1_path):
+                        debug_print(f"\nLoading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
+                        self.logger.log(f"Loading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
+                        pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora1_scale))
+                
+                if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
+                    lora2_path = os.path.join(self.lora_dir, self.lora2_model)
+                    if os.path.exists(lora2_path):
+                        debug_print(f"\nLoading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
+                        self.logger.log(f"Loading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
+                        pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora2_scale))
+                
+                if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
+                    lora3_path = os.path.join(self.lora_dir, self.lora3_model)
+                    if os.path.exists(lora3_path):
+                        debug_print(f"\nLoading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
+                        self.logger.log(f"Loading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
+                        pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora3_scale))
+            except Exception as e:
+                error_msg = f"Error loading custom LoRAs: {str(e)}"
+                debug_print(error_msg, debug_enabled)
+                self.logger.log(error_msg)
+            
         if self.current_processor == "redux":
             pipe = FluxPipeline.from_single_file(
                 base_model,
@@ -412,6 +524,40 @@ class FluxControlNetTab:
             if use_hyper_flux:
                 pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
                 pipe.fuse_lora(lora_scale=0.125)
+                
+                
+            try:
+                if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
+                    lora1_path = os.path.join(self.lora_dir, self.lora1_model)
+                    if os.path.exists(lora1_path):
+                        debug_print(f"\nLoading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
+                        self.logger.log(f"Loading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
+                        pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora1_scale))
+                
+                if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
+                    lora2_path = os.path.join(self.lora_dir, self.lora2_model)
+                    if os.path.exists(lora2_path):
+                        debug_print(f"\nLoading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
+                        self.logger.log(f"Loading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
+                        pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora2_scale))
+                
+                if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
+                    lora3_path = os.path.join(self.lora_dir, self.lora3_model)
+                    if os.path.exists(lora3_path):
+                        debug_print(f"\nLoading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
+                        self.logger.log(f"Loading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
+                        pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora3_scale))
+            except Exception as e:
+                error_msg = f"Error al cargar LoRAs personalizados: {str(e)}"
+                debug_print(error_msg, debug_enabled)
+                self.logger.log(error_msg)
+                
+            # Continuar con el LoRA predeterminado de Redux
+            #pipe.load_lora_weights("./models/lora/pyros_flux_atj.safetensors", lora_scale=1.500)
+            #pipe.fuse_lora(lora_scale=1.000)
         
         debug_print("\nQuantizing main transformer...", debug_enabled)
         pipe.transformer = quantize_model_to_nf4(pipe.transformer, "Transformer principal", debug_enabled)
@@ -476,13 +622,66 @@ class FluxControlNetTab:
         reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
         prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1, 
         pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, text_encoder, text_encoder_2, 
-        tokenizer, tokenizer_2, debug_enabled, output_dir):
+        tokenizer, tokenizer_2, debug_enabled, output_dir, lora1_model, lora1_scale, 
+        lora2_model, lora2_scale, lora3_model, lora3_scale):
         try:
             debug_print("\nStarting inference...", debug_enabled)
             
+            # Guardar los valores de LoRA como atributos de clase
+            self.lora1_model = lora1_model
+            self.lora1_scale = lora1_scale
+            self.lora2_model = lora2_model
+            self.lora2_scale = lora2_scale
+            self.lora3_model = lora3_model
+            self.lora3_scale = lora3_scale
+            
+            # Verificar si necesitamos recargar el modelo
+            need_reload = False
+            
+            # Si el pipe no existe, necesitamos cargarlo
             if self.pipe is None:
-                debug_print("Loading models for the first time...", debug_enabled)
+                need_reload = True
+                debug_print("Cargando modelos por primera vez", debug_enabled)
+            # Si el procesador cambió, necesitamos recargar
+            elif self.loaded_processor != self.current_processor:
+                need_reload = True
+                debug_print(f"Procesador cambió de {self.loaded_processor} a {self.current_processor}", debug_enabled)
+            # Si el estado de Hyper-Flux cambió
+            elif self.loaded_hyper_flux != use_hyper_flux:
+                need_reload = True
+                debug_print(f"Estado de Hyper-Flux cambió", debug_enabled)
+            # Si algún LoRA cambió (modelo o escala)
+            elif (self.loaded_lora1 != lora1_model or 
+                  (lora1_model != "None" and self.loaded_lora1_scale != lora1_scale) or
+                  self.loaded_lora2 != lora2_model or 
+                  (lora2_model != "None" and self.loaded_lora2_scale != lora2_scale) or
+                  self.loaded_lora3 != lora3_model or 
+                  (lora3_model != "None" and self.loaded_lora3_scale != lora3_scale)):
+                need_reload = True
+                debug_print("LoRAs changed, reloading models", debug_enabled)
+            
+            if need_reload:
+                # Si tenemos que recargar, liberar memoria primero
+                if self.pipe is not None:
+                    del self.pipe
+                    self.pipe = None
+                    clear_memory(debug_enabled)
+                
+                # Cargar el nuevo modelo
                 self.pipe = self.load_models(use_hyper_flux=use_hyper_flux, debug_enabled=debug_enabled)
+                
+                # Actualizar estado del pipeline para futuras comparaciones
+                self.loaded_processor = self.current_processor
+                self.loaded_hyper_flux = use_hyper_flux
+                self.loaded_lora1 = lora1_model
+                self.loaded_lora1_scale = lora1_scale if lora1_model != "None" else None
+                self.loaded_lora2 = lora2_model
+                self.loaded_lora2_scale = lora2_scale if lora2_model != "None" else None
+                self.loaded_lora3 = lora3_model
+                self.loaded_lora3_scale = lora3_scale if lora3_model != "None" else None
+                self.logger.log("Model loaded with new parameters")
+            else:
+                debug_print("Reutilizando modelo cargado previamente", debug_enabled)
             
             control_image = self.load_control_image(input_image)
             if self.current_processor == "canny":
@@ -505,9 +704,9 @@ class FluxControlNetTab:
             if self.current_processor == "redux":
                 control_image = control_image 
                 control_image2 = control_image2
-                
-            if randomize_seed:
-                seed = random.randint(0, 999999999)
+            
+            # La generación de semilla se manejará en generate_with_state para cada imagen
+            # y se pasará el valor aquí, ya no se modifica en este método
             seed_value = int(seed) if seed is not None else 0
                 
             if self.current_processor == "canny":
@@ -520,7 +719,7 @@ class FluxControlNetTab:
                         width=width,
                         num_inference_steps=int(steps),
                         guidance_scale=guidance,
-                        generator=torch.Generator("cpu").manual_seed(seed_value)
+                        generator=create_generator(seed_value)
                     )
                     self.logger.log("Generation completed")
                         
@@ -534,7 +733,7 @@ class FluxControlNetTab:
                         width=width,
                         num_inference_steps=int(steps),
                         guidance_scale=guidance,
-                        generator=torch.Generator("cpu").manual_seed(seed_value)
+                        generator=create_generator(seed_value)
                     )
                     self.logger.log("Generation completed")
                 
@@ -547,7 +746,7 @@ class FluxControlNetTab:
                     tokenizer=self.pipe.tokenizer,
                     tokenizer_2=self.pipe.tokenizer_2,
                     torch_dtype=torch.bfloat16
-                ).to("cuda")
+                ).to(device)
                     
                 my_prompt = prompt
                 my_prompt2 = prompt2 if prompt2 else prompt  # Aseguramos que prompt2 tenga un valor
@@ -594,12 +793,13 @@ class FluxControlNetTab:
             # Guardar la imagen
             output_directory = self.output_dir
             os.makedirs(output_directory, exist_ok=True)
-            timestamp = datetime.now().strftime("%y_%m_%d")
+            timestamp = datetime.now().strftime("%y_%m_%d_%H%M%S")  # Added hours, minutes, seconds
             mode_map = {
                 "canny": "canny",
                 "depth": "depth",
                 "redux": "redux"
             }
+            
             filename = f"{mode_map[self.current_processor]}_{seed_value}_{timestamp}.png"
             file_path = os.path.join(output_directory, filename)
             
@@ -618,10 +818,12 @@ def on_ui_tabs():
     settings = load_settings()
     if settings:
         initial_checkpoints = settings["checkpoint_path"]
-        #initial_debug = settings["debug_mode"]
+        initial_output = settings["output_dir"]
+        initial_lora = settings["lora_dir"]
     else:
         initial_checkpoints = "./models/stable-diffusion/"
-        initial_debug = False 
+        initial_output = "./outputs/fluxcontrolnet/"
+        initial_lora = "./models/lora/"
     
     #with gr.Blocks(analytics_enabled=False) as flux_interface:
     with gr.Blocks() as flux_interface:
@@ -744,7 +946,10 @@ def on_ui_tabs():
                     show_progress=True,
                     visible=True
                 )
-
+        
+        # New row for LoRA selectors
+        
+        
                
         with gr.Row():
             width = gr.Slider(label="Width :", minimum=256, maximum=2048, value=1024, step=16)
@@ -754,6 +959,37 @@ def on_ui_tabs():
             with gr.Row():
                 seed = gr.Number(label="Seed :", minimum=0, maximum=999999999, value=0, step=1)
                 randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+                
+        with gr.Row():
+            # LoRA 1
+            lora1_model = gr.Dropdown(
+                choices=list_lora_files(flux_tab.lora_dir), 
+                label="Custom LoRA 1", 
+                value="None", 
+                scale=2
+            )
+            lora1_scale = gr.Slider(label="Strength LoRA 1", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
+            
+            # LoRA 2
+            lora2_model = gr.Dropdown(
+                choices=list_lora_files(flux_tab.lora_dir), 
+                label="Custom LoRA 2", 
+                value="None", 
+                scale=2
+            )
+            lora2_scale = gr.Slider(label="Strength LoRA 2", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
+            
+            # LoRA 3
+            lora3_model = gr.Dropdown(
+                choices=list_lora_files(flux_tab.lora_dir), 
+                label="Custom LoRA 3", 
+                value="None", 
+                scale=2
+            )
+            lora3_scale = gr.Slider(label="Strength LoRA 3", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
+            
+            refresh_all_loras_btn = gr.Button("🔄 Refresh LoRA Folder", size="sm", scale=0.5)
+                
         with gr.Row():
             low_threshold = gr.Slider(label="Low Threshold:", minimum=0, maximum=256, value=50, step=1, visible=True)
             high_threshold = gr.Slider(label="High Threshold:", minimum=0, maximum=256, value=200, step=1, visible=True)
@@ -841,25 +1077,31 @@ def on_ui_tabs():
             settings = load_settings() or {}
             checkpoint_value = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             output_value = settings.get("output_dir", "./outputs/fluxcontrolnet/")
+            lora_value = settings.get("lora_dir", "./models/lora/")
             
             with gr.Row():
                 ckpt_display = gr.Markdown(f"Latest checkpoints path: `{checkpoint_value}`")
                 outp_display = gr.Markdown(f"Latest images output dir: `{output_value}`")
+                lora_display = gr.Markdown(f"Latest LoRA path: `{lora_value}`")
        
-     
             with gr.Row():
                 
                 checkpoint_path = gr.Textbox(
                     label="Checkpoints_Path :",
-                    value=checkpoint_value,  # Valor inicial desde la instancia
+                    value=checkpoint_value,
                     placeholder="Enter model path..."
                 )
                 
-                #output_dir = output_dir if 'output_dir' in globals() and output_dir else "./outputs/fluxcontrolnet/"
                 output_dir = gr.Textbox(
                     label="Output_Images_Path :",
-                    value=output_value,  # Valor inicial desde la instancia
+                    value=output_value,
                     placeholder="Enter output path..."
+                )
+                
+                lora_dir = gr.Textbox(
+                    label="LoRA_Path :",
+                    value=lora_value,
+                    placeholder="Enter LoRA path..."
                 )
                             
             with gr.Row():
@@ -884,19 +1126,41 @@ def on_ui_tabs():
             #botones
             
             # Función wrapper para actualizar la instancia al guardar
-            def save_settings_wrapper(checkpoint_path_val, output_dir_val, debug_val):
-                log_msg, new_cp, new_od = save_settings(checkpoint_path_val, output_dir_val, debug_val)
+            def save_settings_wrapper(checkpoint_path_val, output_dir_val, lora_dir_val, debug_val):
+                log_msg, new_cp, new_od, new_lora = save_settings(
+                    checkpoint_path_val, 
+                    output_dir_val,
+                    lora_dir_val,
+                    debug_val
+                )
                 flux_tab.checkpoint_path = new_cp
                 flux_tab.output_dir = new_od
-
+                flux_tab.lora_dir = new_lora
                 
-                return log_msg, new_cp, new_od
+                # Actualizar las listas de LoRAs
+                new_lora_choices = list_lora_files(new_lora)
+                
+                return [
+                    log_msg,           # log_box
+                    new_cp,            # checkpoint_path
+                    new_od,            # output_dir
+                    new_lora,          # lora_dir
+                    gr.update(choices=new_lora_choices),  # lora1_model
+                    gr.update(choices=new_lora_choices),  # lora2_model
+                    gr.update(choices=new_lora_choices),  # lora3_model
+                    gr.Markdown.update(value=f"Latest checkpoints path: `{new_cp}`"),
+                    gr.Markdown.update(value=f"Latest images output dir: `{new_od}`"),
+                    gr.Markdown.update(value=f"Latest LoRA path: `{new_lora}`")
+                ]
             
             save_settings_btn.click(
-                
                 fn=save_settings_wrapper,
-                inputs=[checkpoint_path, output_dir, debug],
-                outputs=[log_box, checkpoint_path, output_dir]
+                inputs=[checkpoint_path, output_dir, lora_dir, debug],
+                outputs=[
+                    log_box, checkpoint_path, output_dir, lora_dir,
+                    lora1_model, lora2_model, lora3_model,
+                    ckpt_display, outp_display, lora_display
+                ]
             )
 
             save_settingsHF_btn.click(
@@ -1129,24 +1393,37 @@ def on_ui_tabs():
             low_threshold, high_threshold, detect_resolution, image_resolution,
             reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
             prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
-            pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
+            pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch,
+            lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale
         ):
             try:
                 results = []
                 total_batch = int(batch) if batch is not None else 1
                 
+                # Track the last used seed
+                last_used_seed = None
+                
                 status_msg = "Starting generation..."
                 yield results, flux_tab.logger.log(status_msg), status_msg, gr.update()
                 
                 for i in range(total_batch):
+                    # Generate the seed just before generating the image
+                    if randomize_seed:
+                        current_seed = random.randint(0, 999999999)
+                    elif i > 0:  
+                        # If not randomized but in batch > 1, increment the seed
+                        current_seed = int(seed) + i
+                    else:
+                        # First batch with non-randomized seed
+                        current_seed = int(seed)
                     
-                    local_seed = random.randint(0, 999999999) if randomize_seed else seed
+                    # Keep track of the last used seed
+                    last_used_seed = current_seed
                     
+                    status_msg = f"Generating image {i+1} of {total_batch} with seed: {current_seed}"
+                    yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=current_seed)
                     
-                    status_msg = f"Generating image {i+1} of {total_batch} with seed: {local_seed}"
-                    yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=local_seed)
-                    
-                    # Generar la imagen
+                    # Generate the image with the current seed
                     result = flux_tab.generate(
                         prompt=prompt,
                         prompt2=prompt2,
@@ -1162,8 +1439,8 @@ def on_ui_tabs():
                         reference_image=reference_image,
                         debug=debug,
                         processor_id=processor_id,
-                        seed=local_seed,
-                        randomize_seed=randomize_seed,
+                        seed=current_seed,  # We use the calculated seed for this image
+                        randomize_seed=False,  # We pass False because we already handle randomization here
                         reference_scale=reference_scale,
                         prompt_embeds_scale_1=prompt_embeds_scale_1,
                         prompt_embeds_scale_2=prompt_embeds_scale_2,
@@ -1176,22 +1453,29 @@ def on_ui_tabs():
                         debug_enabled=debug,
                         use_hyper_flux=use_hyper_flux,
                         control_image2=control_image2,
-                        output_dir=output_dir
+                        output_dir=output_dir,
+                        lora1_model=lora1_model,
+                        lora1_scale=lora1_scale,
+                        lora2_model=lora2_model,
+                        lora2_scale=lora2_scale,
+                        lora3_model=lora3_model,
+                        lora3_scale=lora3_scale
                     )
                     
                     if result is not None:
                         results.append(result)
                         status_msg = f"Completed {i+1} of {total_batch} images"
-                        yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=local_seed)
+                        yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=current_seed)
                 
+                # Always update the UI with the last seed we actually used
+                # This ensures the seed field shows the most recent seed value
                 final_msg = "Generation completed successfully!"
-                yield results, flux_tab.logger.log(final_msg), final_msg, gr.update()
+                yield results, flux_tab.logger.log(final_msg), final_msg, gr.update(value=last_used_seed)
                 
             except Exception as e:
                 error_msg = f"Error in generation: {str(e)}"
                 print(error_msg)
                 yield None, flux_tab.logger.log(error_msg), error_msg, gr.update()
-                
 
 #----------------------------
 
@@ -1201,6 +1485,21 @@ def on_ui_tabs():
             fn=flux_tab.toggle_reference_visibility,
             inputs=[reference_visible, gr.State(flux_tab.current_processor)],
             outputs=[reference_visible, reference_image, control_image2, toggle_reference_btn, prompt2]
+        )
+
+        # Función para actualizar la lista de LoRAs
+        def refresh_all_loras():
+            choices = list_lora_files(flux_tab.lora_dir)
+            return [
+                gr.Dropdown.update(choices=choices),
+                gr.Dropdown.update(choices=choices),
+                gr.Dropdown.update(choices=choices)
+            ]
+
+        refresh_all_loras_btn.click(
+            fn=refresh_all_loras,
+            inputs=[],
+            outputs=[lora1_model, lora2_model, lora3_model]
         )
 
         generate_btn.click(
@@ -1214,7 +1513,8 @@ def on_ui_tabs():
                 low_threshold, high_threshold, detect_resolution, image_resolution,
                 reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
                 prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
-                pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch
+                pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch,
+                lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale
             ],
             outputs=[output_gallery, log_box, progress_bar, seed],  # Agregamos seed a los outputs
             show_progress=True
