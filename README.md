@@ -12,7 +12,7 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 ## Supports
 ✅ CUDA GPUs (tested with GPUs of 12GB VRAM, should work with 8GB VRAM).
 
-❌ LoRa
+❌ Custom LoRa (coming soon...)
 
 ## Requierements
 > [!WARNING]  
