@@ -30,6 +30,7 @@ import io
 import logging
 import sys
 from h11._util import LocalProtocolError
+#from PIL import Image
 
 import torch
 
@@ -378,22 +379,35 @@ class FluxControlNetTab:
             return 
         return # CannyDetector()  # Default to Canny
 
-    def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None):
+    def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None, width=None, height=None):
         try:
             if input_image is None:
                 return None
         
             debug_print("\nStarting preprocessing...", debug_enabled)
             
+            # Registrar tamaño original
+            if isinstance(input_image, np.ndarray):
+                original_height, original_width = input_image.shape[:2]
+                debug_print(f"Input image dimensions: {original_width}x{original_height}", debug_enabled)
+            
             # Cargar y validar imagen
             control_image = self.load_control_image(input_image)
             if not control_image:
                 raise ValueError("Failed to load control image")
+            
+            # Registrar tamaño después de cargar
+            debug_print(f"Control image size after loading: {control_image.size}", debug_enabled)
                 
             # Convertir a RGB si es necesario
             if control_image.mode != 'RGB':
                 control_image = control_image.convert('RGB')
-                
+            
+            # Guardar las dimensiones originales
+            original_width, original_height = control_image.size
+            target_width = width if width is not None else original_width
+            target_height = height if height is not None else original_height
+            
             # Aplicar preprocesamiento según el modo
             if self.current_processor == "canny":
                 processor = CannyDetector()
@@ -405,9 +419,36 @@ class FluxControlNetTab:
                     image_resolution=int(image_resolution)
                 )
             elif self.current_processor == "depth":
+                from PIL import Image
                 actual_processor_id = processor_id or 'depth_zoe'
                 processor = Processor(actual_processor_id)
+                
+                # Registrar antes del procesamiento
+                debug_print(f"Before depth processing, image size: {control_image.size}", debug_enabled)
+                
+                # Procesar la imagen
                 processed_image = processor(control_image)
+                
+                # Registrar después del procesamiento
+                if isinstance(processed_image, Image.Image):
+                    debug_print(f"After depth processing, image size: {processed_image.size}", debug_enabled)
+                elif isinstance(processed_image, np.ndarray):
+                    debug_print(f"After depth processing, image shape: {processed_image.shape}", debug_enabled)
+                
+                # Forzar las dimensiones originales o las especificadas
+                if isinstance(processed_image, Image.Image):
+                    processed_image = processed_image.resize((target_width, target_height))
+                elif isinstance(processed_image, np.ndarray):
+                    pil_img = Image.fromarray(processed_image)
+                    pil_img = pil_img.resize((target_width, target_height))
+                    processed_image = np.array(pil_img)
+                
+                # Verificar el tamaño final
+                if isinstance(processed_image, Image.Image):
+                    debug_print(f"Final image size: {processed_image.size}", debug_enabled)
+                elif isinstance(processed_image, np.ndarray):
+                    debug_print(f"Final image shape: {processed_image.shape}", debug_enabled)
+            
             else:
                 processed_image = control_image
                 
@@ -418,6 +459,8 @@ class FluxControlNetTab:
             self.logger.log(f"\nError en el preprocesamiento: {str(e)}")
             self.logger.log(f"Stacktrace:\n{traceback.format_exc()}")
             return None
+            
+
 
     def load_models(self, use_hyper_flux=True, debug_enabled=False):  #Text_encoders + vae
         debug_print("\nStarting model loading...", debug_enabled)
@@ -695,15 +738,25 @@ class FluxControlNetTab:
                     image_resolution=int(image_resolution)
                 )
             if self.current_processor == "depth":
+                from PIL import Image  # Importar PIL.Image si no está importado globalmente
                 menupro = "depth"
-                #processor_id = 'depth_zoe'
                 processor = Processor(processor_id)
-                control_image = processor(
-                    control_image, 
-                )
-            if self.current_processor == "redux":
-                control_image = control_image 
-                control_image2 = control_image2
+                
+                # Procesar la imagen
+                control_image = processor(control_image)
+                
+                # Guardar el tamaño original o el especificado por el usuario
+                target_width, target_height = width, height
+                
+                # Redimensionar la imagen procesada a las dimensiones especificadas
+                if isinstance(control_image, Image.Image):
+                    control_image = control_image.resize((target_width, target_height))
+                elif isinstance(control_image, np.ndarray):
+                    pil_img = Image.fromarray(control_image)
+                    pil_img = pil_img.resize((target_width, target_height))
+                    control_image = np.array(pil_img)
+                    
+                self.logger.log(f"Depth image resized to: {target_width}x{target_height}")
             
             # La generación de semilla se manejará en generate_with_state para cada imagen
             # y se pasará el valor aquí, ya no se modifica en este método
@@ -724,6 +777,9 @@ class FluxControlNetTab:
                     self.logger.log("Generation completed")
                         
             elif self.current_processor == "depth":
+                
+            
+            
                 with torch.inference_mode():
                     self.logger.log("Starting generation process...")
                     result = self.pipe(
@@ -1193,10 +1249,10 @@ def on_ui_tabs():
                         detect_resolution=int(detect_resolution),
                         image_resolution=int(image_resolution)
                     )
-                elif mode == "depth":
-                    processor = Processor('depth_zoe')
-                    temp_image = flux_tab.load_control_image(input_image)
-                    processed_image = processor(temp_image)
+                # elif mode == "depth":
+                    # processor = Processor('depth_zoe')
+                    # temp_image = flux_tab.load_control_image(input_image)
+                    # processed_image = processor(temp_image)
                     
             # Convertimos el resultado a numpy array si es necesario
             if processed_image is not None and not isinstance(processed_image, np.ndarray):
@@ -1307,7 +1363,9 @@ def on_ui_tabs():
                 detect_resolution, 
                 image_resolution, 
                 debug, 
-                processor_id
+                processor_id,
+                width,
+                height
             ],
             outputs=[reference_image],
             queue=False
