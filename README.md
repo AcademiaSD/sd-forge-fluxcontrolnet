@@ -22,7 +22,7 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > transformers>=4.48.3,
 > Pillow>=9.5.0,
 > tokenizers>=0.21,
-> huggingface-hub>=0.28.1,
+> huggingface-hub>=0.26.2,
 > controlnet-aux>=0.0.9,
 > 
 > Forge2 already has newer versions for all but diffusers. Be aware that updates to Forge2 may overwrite the requirements file.
