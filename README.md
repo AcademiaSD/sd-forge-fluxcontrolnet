@@ -43,6 +43,9 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > - For Depth
 >   (https://huggingface.co/Academia-SD/flux1-Depth-Dev-FP8/tree/main)
 >
+> - For Fill (coming soon)
+> - (https://huggingface.co/Academia-SD/flux1-Fill-Dev-FP8/tree/main)
+>
 > - Text encoders FP8 
 >   (https://drive.google.com/file/d/1UwDD0bf2Y0upsFI9ZARNpvBUtL22Qxg3/view?usp=drive_link) Unzip into models/diffusers
     
