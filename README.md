@@ -24,6 +24,7 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > tokenizers>=0.21,
 > huggingface-hub>=0.26.2,
 > controlnet-aux>=0.0.9,
+>accelerate==1.3.0
 > 
 > Forge2 already has newer versions for all but diffusers. Be aware that updates to Forge2 may overwrite the requirements file.
 > 
