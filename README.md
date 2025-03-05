@@ -53,5 +53,6 @@ https://youtu.be/iNG5CpOiwXo?si=r23QVgHy0GZHUe9j&t=305
 >
 > - Text encoders FP8
 >   (https://huggingface.co/Academia-SD/flux1-dev-text-encoders/blob/main/text_encoders_FP8.zip) Unzip into models/diffusers
->   or (https://drive.google.com/file/d/1UwDD0bf2Y0upsFI9ZARNpvBUtL22Qxg3/view?usp=drive_link) 
+>   
+>   Alternative download (https://drive.google.com/file/d/1UwDD0bf2Y0upsFI9ZARNpvBUtL22Qxg3/view?usp=drive_link) 
     
