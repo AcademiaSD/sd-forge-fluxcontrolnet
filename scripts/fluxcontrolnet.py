@@ -2,6 +2,7 @@ import gradio as gr
 import torch
 from diffusers import FluxControlPipeline, FluxControlNetModel, AutoencoderKL
 from diffusers import FluxPriorReduxPipeline, FluxPipeline
+from diffusers import FluxFillPipeline
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer, TrainingArguments
 from diffusers.utils import load_image
 from PIL import Image
@@ -30,9 +31,8 @@ import io
 import logging
 import sys
 from h11._util import LocalProtocolError
-#from PIL import Image
-
-import torch
+from modules_forge.forge_canvas.canvas import ForgeCanvas, canvas_head
+from PIL import Image, ImageDraw, ImageChops
 
 # Verificar CUDA (GPU NVIDIA)
 has_cuda = torch.cuda.is_available()
@@ -47,9 +47,6 @@ elif has_mps:
     device = torch.device("mps")
 else:
     device = torch.device("cpu")
-
-# Usar el dispositivo seleccionado
-
 
 class CustomErrorFilter(logging.Filter):
     def filter(self, record):
@@ -89,6 +86,27 @@ def load_huggingface_token():
         print(f"Error loading Hugging Face token: {str(e)}")
         return None
 # Initialize Hugging Face login
+
+def verify_huggingface_token(token):
+    """Verifica si el token de Hugging Face es válido."""
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        # Intenta una operación simple para verificar el token
+        api.whoami(token=token)
+        return True
+    except Exception as e:
+        print(f"Error al verificar token de HF: {str(e)}")
+        return False
+
+def check_existing_token():
+    """Verifica si ya existe un token válido."""
+    token = load_huggingface_token()
+    if token and verify_huggingface_token(token):
+        return "✅ You have a correct HF Token!"
+    return ""
+
+
 try:
     token = load_huggingface_token()
     if token:
@@ -105,6 +123,8 @@ pooled_prompt_embeds_scale_1 = 1.0
 pooled_prompt_embeds_scale_2 = 1.0
 checkpoint_path = "./models/Stable-diffusion/"
 current_model = "flux1-Canny-Dev_FP8.safetensors"
+
+
 
 def list_lora_files(lora_dir="./models/lora/"):
     if not os.path.exists(lora_dir):
@@ -199,10 +219,22 @@ def clear_memory(debug_enabled=False):
         # Para CPU, solo podemos hacer la recolección de basura
         gc.collect()
 
-def update_dimensions(image, width_slider, height_slider):
-    if image is not None:
-        height, width = image.shape[:2]
-        return width, height
+def update_dimensions(image, canvas_background, current_mode, width_slider, height_slider):
+    """Actualiza las dimensiones basándose en la imagen activa según el modo"""
+    
+    # Determinar qué imagen usar según el modo
+    actual_image = canvas_background if current_mode == "fill" else image
+    
+    if actual_image is not None:
+        if isinstance(actual_image, np.ndarray):
+            height, width = actual_image.shape[:2]
+            return width, height
+        elif hasattr(actual_image, "size"):
+            # Para imágenes PIL
+            width, height = actual_image.size
+            return width, height
+    
+    # Si no hay imagen, mantener los valores de los sliders
     return width_slider, height_slider
     
 class LogManager:
@@ -229,7 +261,8 @@ def load_settings():
         settings = {
             "checkpoint_path": "./models/Stable-diffusion/",
             "output_dir": "./outputs/fluxcontrolnet/",
-            "lora_dir": "./models/lora/"  # Valor por defecto para loras
+            "lora_dir": "./models/lora/",  # Valor por defecto para loras
+            "text_encoders_path": "./models/Stable-diffusion/text_encoders_FP8"  # Default for text encoders
         }
         
         if os.path.exists(config_path):
@@ -250,11 +283,17 @@ def save_settingsHF(hf_token_value):
         token_path = os.path.join(root_dir, "huggingface_access_token.txt")
         with open(token_path, 'w') as f:
             f.write(hf_token_value)
-        return f"HF Token saved"
+        
+        # Verificar si el token es válido utilizando la nueva función
+        if verify_huggingface_token(hf_token_value):
+            return f"✅ HF Token saved and verified!", "✅ You have a correct HF Token!"
+        else:
+            return f"⚠️ HF Token saved but could not be verified!", ""
+            
     except Exception as e:
-        return f"Error saving HF Token: {str(e)}"
+        return f"❌ Error saving HF Token: {str(e)}", ""
 
-def save_settings(checkpoints_path, output_dir, lora_dir, debug_enabled=False):
+def save_settings(checkpoints_path, output_dir, lora_dir, text_encoders_path, debug_enabled=False):
     try:
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         extension_dir = os.path.join(root_dir, "extensions", "sd-forge-fluxcontrolnet", "utils")
@@ -263,21 +302,25 @@ def save_settings(checkpoints_path, output_dir, lora_dir, debug_enabled=False):
         config = {
             "checkpoint_path": checkpoints_path,
             "output_dir": output_dir,
-            "lora_dir": lora_dir
+            "lora_dir": lora_dir,
+            "text_encoders_path": text_encoders_path
         }
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
         log_message = "Settings file saved"
-        return log_message, checkpoints_path, output_dir, lora_dir
+        return log_message, checkpoints_path, output_dir, lora_dir, text_encoders_path
     except Exception as e:
         error_message = f"Error saving settings file: {str(e)}"
-        return error_message, checkpoints_path, output_dir, lora_dir
+        return error_message, checkpoints_path, output_dir, lora_dir, text_encoders_path
         
 class FluxControlNetTab:
     def __init__(self):
         self.pipe = None
-        #self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4"
-        self.model_path = "./models/diffusers/text_encoders_FP8"
+        #self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4
+        self.model_path = "./models/diffusers/text_encoders_FP8"  # Default path
+        self.text_encoders_path = "./models/Stable-diffusion/text_encoders_FP8"  # New default path
+        
+
         self.current_processor = "canny"
         self.current_model = "flux1-Canny-Dev_FP8.safetensors"
         self.checkpoint_path = "./models/Stable-diffusion/"
@@ -304,35 +347,475 @@ class FluxControlNetTab:
         self.loaded_lora3_scale = None
         settings = load_settings()
         if settings:
+        
             self.checkpoint_path = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             self.output_dir = settings.get("output_dir", "./outputs/fluxcontrolnet/")
             self.lora_dir = settings.get("lora_dir", "./models/lora/")  # Cargar la ruta de loras
+            self.text_encoders_path = settings.get("text_encoders_path", "./models/Stable-diffusion/text_encoders_FP8")  # Load from settings
         else:
             self.checkpoint_path = "./models/Stable-diffusion/"
             self.output_dir = "./outputs/fluxcontrolnet/"
             self.lora_dir = "./models/lora/"
+            self.text_encoders_path = "./models/Stable-diffusion/text_encoders_FP8"  # Default path
             
+    def expand_canvas(self, background_image, expand_up=False, expand_down=False, expand_left=False, expand_right=False, expand_range="128"):
+        """
+        Expande el lienzo de la imagen en las direcciones seleccionadas, añadiendo píxeles
+        de espacio en blanco en cada dirección marcada según el rango seleccionado.
+        """
+        try:
+            self.logger.log("Expanding canvas...")
+            
+            # Convertir el rango a un número entero
+            expand_pixels = int(expand_range)
+            self.logger.log(f"Expansion range: {expand_pixels} pixels")
+            
+            # Convertir a PIL Image si es un numpy array
+            if background_image is None:
+                self.logger.log("No image to expand")
+                return None, None
+                
+            if isinstance(background_image, np.ndarray):
+                pil_img = Image.fromarray(background_image.astype('uint8'))
+            else:
+                pil_img = background_image
+                
+            # Obtener dimensiones originales
+            width, height = pil_img.size
+            self.logger.log(f"Original size: {width}x{height}")
+            
+            # Calcular nuevas dimensiones
+            new_width = width + (expand_pixels if expand_left else 0) + (expand_pixels if expand_right else 0)
+            new_height = height + (expand_pixels if expand_up else 0) + (expand_pixels if expand_down else 0)
+            
+            # Si no hay cambios, devolver la imagen original
+            if new_width == width and new_height == height:
+                self.logger.log("Inpaint without expansion")
+                return pil_img, Image.new('L', (width, height), 0)  # Máscara vacía
+            
+            self.logger.log(f"New size: {new_width}x{new_height}")
+            
+            # Crear nuevo lienzo (con fondo blanco)
+            new_img = Image.new('RGB', (new_width, new_height), (255, 255, 255))
+            
+            # Calcular la posición para pegar la imagen original
+            paste_x = expand_pixels if expand_left else 0
+            paste_y = expand_pixels if expand_up else 0
+            
+            # Pegar la imagen original en el nuevo lienzo
+            new_img.paste(pil_img, (paste_x, paste_y))
+            
+            # Crear una máscara correspondiente (blanca en las áreas nuevas)
+            mask = Image.new('L', (new_width, new_height), 0)  # Inicialmente toda negra
+            
+            # Marcar las áreas expandidas como blancas (áreas a procesar)
+            draw = ImageDraw.Draw(mask)
+            
+            # Arriba
+            if expand_up:
+                draw.rectangle([0, 0, new_width, paste_y - 1], fill=255)
+                self.logger.log(f"Expanding {expand_pixels}px to up")
+                
+            # Abajo
+            if expand_down:
+                draw.rectangle([0, height + paste_y, new_width, new_height], fill=255)
+                self.logger.log(f"Expanding {expand_pixels}px to down")
+                
+            # Izquierda
+            if expand_left:
+                draw.rectangle([0, 0, paste_x - 1, new_height], fill=255)
+                self.logger.log(f"Expanding {expand_pixels}px to left")
+                
+            # Derecha
+            if expand_right:
+                draw.rectangle([width + paste_x, 0, new_width, new_height], fill=255)
+                self.logger.log(f"Expanding {expand_pixels}px to right")
+            
+            self.logger.log("Canvas expansion completed")
+            return new_img, mask
+            
+        except Exception as e:
+            error_msg = f"Error expanding canvas: {str(e)}"
+            self.logger.log(error_msg)
+            # En caso de error, devolver la imagen original sin cambios
+            if isinstance(background_image, np.ndarray):
+                return Image.fromarray(background_image.astype('uint8')), None
+            return background_image, None
+                    
+            
+    def fill_canvas_to_mask(self, background, foreground, expand_up, expand_down, expand_left, expand_right, expand_range, mask_blur):
+        """
+        Transfiere tanto la máscara como la imagen base del canvas, expandiendo según las direcciones seleccionadas.
+        Aplica blur a los bordes de la máscara para mejorar las transiciones.
+        """
+        # Variables para almacenar resultados
+        mask = None
+        new_width = 0
+        new_height = 0
         
+        # 1. Primero, procesar la máscara dibujada por el usuario (si existe)
+        if foreground is not None:
+            if isinstance(foreground, np.ndarray):
+                user_mask = Image.fromarray(foreground).convert('L')
+            else:
+                user_mask = foreground.convert('L')
+            
+            # Inicializamos la máscara con la del usuario
+            mask = user_mask
+        else:
+            # Si no hay máscara de usuario, crear una vacía
+            if background is not None:
+                if isinstance(background, np.ndarray):
+                    h, w = background.shape[:2]
+                    user_mask = Image.new('L', (w, h), 0)  # Máscara vacía
+                else:
+                    w, h = background.size
+                    user_mask = Image.new('L', (w, h), 0)  # Máscara vacía
+                mask = user_mask
+        
+        # 2. Luego, expandir el lienzo si se ha seleccionado alguna dirección
+        if (expand_up or expand_down or expand_left or expand_right) and background is not None:
+            # Convertir el rango a un número entero
+            expand_pixels = int(expand_range)
+            self.logger.log(f"Expansion range: {expand_pixels} pixels")
+            
+            # Convertir background a PIL Image si es un numpy array
+            if isinstance(background, np.ndarray):
+                bg_img = Image.fromarray(background.astype('uint8'))
+            else:
+                bg_img = background
+                
+            # Obtener dimensiones originales
+            original_width, original_height = bg_img.size
+            self.logger.log(f"Original dimensions: {original_width}x{original_height}")
+            
+            # Calcular nuevas dimensiones
+            new_width = original_width + (expand_pixels if expand_left else 0) + (expand_pixels if expand_right else 0)
+            new_height = original_height + (expand_pixels if expand_up else 0) + (expand_pixels if expand_down else 0)
+            
+            # Si hay cambios en las dimensiones
+            if new_width != original_width or new_height != original_height:
+                self.logger.log(f"New dimensions: {new_width}x{new_height}")
+                
+                # Crear nuevo lienzo (con fondo blanco)
+                new_img = Image.new('RGB', (new_width, new_height), (255, 255, 255))
+                
+                # Calcular la posición para pegar la imagen original
+                paste_x = expand_pixels if expand_left else 0
+                paste_y = expand_pixels if expand_up else 0
+                
+                # Pegar la imagen original en el nuevo lienzo
+                new_img.paste(bg_img, (paste_x, paste_y))
+                
+                # Crear una nueva máscara del tamaño extendido
+                extended_mask = Image.new('L', (new_width, new_height), 0)  # Inicialmente toda negra
+                
+                # Pegar la máscara del usuario en la posición correcta de la máscara extendida
+                if mask is not None:
+                    extended_mask.paste(mask, (paste_x, paste_y))
+                
+                # Marcar las áreas expandidas como blancas (áreas a procesar)
+                draw = ImageDraw.Draw(extended_mask)
+                
+                # Arriba
+                if expand_up:
+                    draw.rectangle([0, 0, new_width, paste_y - 1], fill=255)
+                    self.logger.log(f"Expanding {expand_pixels}px to UP")
+                    
+                # Abajo
+                if expand_down:
+                    draw.rectangle([0, original_height + paste_y, new_width, new_height], fill=255)
+                    self.logger.log(f"Expanding {expand_pixels}px to DOWN")
+                    
+                # Izquierda
+                if expand_left:
+                    draw.rectangle([0, 0, paste_x - 1, new_height], fill=255)
+                    self.logger.log(f"Expanding {expand_pixels}px to LEFT")
+                    
+                # Derecha
+                if expand_right:
+                    draw.rectangle([original_width + paste_x, 0, new_width, new_height], fill=255)
+                    self.logger.log(f"Expanding {expand_pixels}px to RIGHT")
+                
+                # Actualizar la imagen de fondo y la máscara
+                background = new_img
+                mask = extended_mask
+                
+                self.logger.log("Canvas expansion completed")
+            else:
+                # Si no hay cambio en dimensiones, usar las originales
+                new_width = original_width
+                new_height = original_height
+        else:
+            # Si no hay expansión, usar las dimensiones originales
+            if background is not None:
+                if isinstance(background, np.ndarray):
+                    new_height, new_width = background.shape[:2]
+                else:
+                    new_width, new_height = background.size
+        
+        # 3. Aplicar blur a la máscara si se especificó un valor de blur
+        if mask is not None and mask_blur > 0:
+            self.logger.log(f"Applying {mask_blur} pixel blur to the mask")
+            try:
+                # Primero convertimos a numpy para mayor flexibilidad
+                mask_np = np.array(mask)
+                
+                # Aplicar filtro gaussiano para suavizar los bordes
+                from scipy.ndimage import gaussian_filter
+                
+                # Crear una versión borrosa de la máscara
+                blurred_mask = gaussian_filter(mask_np.astype(float), sigma=mask_blur/2)
+                
+                # Normalizar a 0-255
+                blurred_mask = (blurred_mask / blurred_mask.max() * 255).astype(np.uint8)
+                
+                # Crear una nueva imagen PIL con la máscara borrosa
+                mask = Image.fromarray(blurred_mask)
+                
+                self.logger.log("Blur applied correctly to the mask")
+            except Exception as e:
+                self.logger.log(f"Error applying blur to mask: {str(e)}")
+                # Continuar con la máscara original si hay un error
+        
+        # IMPORTANTE: Ahora devolvemos la máscara, el fondo y las nuevas dimensiones
+        return mask, background, new_width, new_height
+    
+    
+            
+    def switch_mode(self, new_mode, use_hyper_flux=False):
+        """Cambia al modo seleccionado y actualiza la interfaz."""
+        # Actualizar modo actual
+        old_mode = self.current_processor
+        self.current_processor = new_mode
+        
+        # Establecer modelo correspondiente
+        if new_mode == "canny":
+            self.current_model = "flux1-Canny-Dev_FP8.safetensors"
+            self.default_processor_id = None
+        elif new_mode == "depth":
+            self.current_model = "flux1-Depth-Dev_FP8.safetensors"
+            self.default_processor_id = "depth_zoe"
+        elif new_mode == "redux":
+            self.current_model = "flux1-Dev_FP8.safetensors" 
+            self.default_processor_id = None
+        elif new_mode == "fill":
+            self.current_model = "flux1-Fill-Dev_FP8.safetensors"
+            self.default_processor_id = None
+        
+        # Limpiar pipeline si es necesario
+        if self.pipe is not None:
+            del self.pipe
+            self.pipe = None
+            clear_memory()
+        
+        # Actualizaciones de botones
+        canny_update = gr.Button.update(variant="secondary" if new_mode == "canny" else "primary", visible=True)
+        depth_update = gr.Button.update(variant="secondary" if new_mode == "depth" else "primary", visible=True)
+        redux_update = gr.Button.update(variant="secondary" if new_mode == "redux" else "primary", visible=True)
+        fill_update = gr.Button.update(variant="secondary" if new_mode == "fill" else "primary", visible=True)
+        
+        # Actualizaciones comunes
+        steps_update = gr.update(value=10 if use_hyper_flux else 30)
+        
+        # CLAVE: Establecer la visibilidad de reference_image
+        reference_image_visible = new_mode in ["canny", "depth"]
+        
+        # Devolver lista de actualizaciones según el modo
+        if new_mode == "canny":
+            return [
+                canny_update,                   # canny_btn
+                depth_update,                   # depth_btn
+                redux_update,                   # redux_btn
+                fill_update,                    # fill_btn
+                gr.update(visible=True, label="Control Image"), # input_image
+                gr.update(visible=False),       # fill_canvas_group
+                new_mode,                       # current_mode
+                gr.update(visible=True),        # low_threshold
+                gr.update(visible=True),        # high_threshold
+                gr.update(visible=True),        # detect_resolution
+                gr.update(visible=True),        # image_resolution
+                gr.update(visible=False),       # processor_id
+                gr.update(visible=False),       # reference_scale
+                gr.update(visible=False),       # prompt_embeds_scale_1
+                gr.update(visible=False),       # prompt_embeds_scale_2
+                gr.update(visible=False),       # pooled_prompt_embeds_scale_1
+                gr.update(visible=False),       # pooled_prompt_embeds_scale_2
+                steps_update,                   # steps
+                gr.update(value=30),            # guidance
+                gr.update(visible=False),       # control_image2
+                gr.update(visible=False),       # prompt2
+                gr.update(visible=False),       # mask_image
+                gr.update(visible=False),       # fill_controls
+                gr.update(visible=False),       # transfer_mask_btn
+                gr.update(visible=True)         # reference_image - VISIBLE
+            ]
+        elif new_mode == "depth":
+            return [
+                canny_update,                   # canny_btn
+                depth_update,                   # depth_btn
+                redux_update,                   # redux_btn
+                fill_update,                    # fill_btn
+                gr.update(visible=True, label="Control Image"), # input_image
+                gr.update(visible=False),       # fill_canvas_group
+                new_mode,                       # current_mode
+                gr.update(visible=False),       # low_threshold
+                gr.update(visible=False),       # high_threshold
+                gr.update(visible=False),       # detect_resolution
+                gr.update(visible=False),       # image_resolution
+                gr.update(visible=True),        # processor_id
+                gr.update(visible=False),       # reference_scale
+                gr.update(visible=False),       # prompt_embeds_scale_1
+                gr.update(visible=False),       # prompt_embeds_scale_2
+                gr.update(visible=False),       # pooled_prompt_embeds_scale_1
+                gr.update(visible=False),       # pooled_prompt_embeds_scale_2
+                steps_update,                   # steps
+                gr.update(value=30),            # guidance
+                gr.update(visible=False),       # control_image2
+                gr.update(visible=False),       # prompt2
+                gr.update(visible=False),       # mask_image
+                gr.update(visible=False),       # fill_controls
+                gr.update(visible=False),       # transfer_mask_btn
+                gr.update(visible=True, value=None)         # reference_image - VISIBLE
+            ]
+        elif new_mode == "redux":
+            return [
+                canny_update,                   # canny_btn
+                depth_update,                   # depth_btn
+                redux_update,                   # redux_btn
+                fill_update,                    # fill_btn
+                gr.update(visible=True, label="Control Image"), # input_image
+                gr.update(visible=False),       # fill_canvas_group
+                new_mode,                       # current_mode
+                gr.update(visible=False),       # low_threshold
+                gr.update(visible=False),       # high_threshold
+                gr.update(visible=False),       # detect_resolution
+                gr.update(visible=False),       # image_resolution
+                gr.update(visible=False),       # processor_id
+                gr.update(visible=True),        # reference_scale
+                gr.update(visible=True),        # prompt_embeds_scale_1
+                gr.update(visible=True),        # prompt_embeds_scale_2
+                gr.update(visible=True),        # pooled_prompt_embeds_scale_1
+                gr.update(visible=True),        # pooled_prompt_embeds_scale_2
+                steps_update,                   # steps
+                gr.update(value=3.5),           # guidance
+                gr.update(visible=True),        # control_image2
+                gr.update(visible=True),        # prompt2
+                gr.update(visible=False),       # mask_image
+                gr.update(visible=False),       # fill_controls
+                gr.update(visible=False),       # transfer_mask_btn
+                gr.update(visible=False)        # reference_image - OCULTO
+            ]
+        elif new_mode == "fill":
+            return [
+                canny_update,                   # canny_btn
+                depth_update,                   # depth_btn
+                redux_update,                   # redux_btn
+                fill_update,                    # fill_btn
+                gr.update(visible=False),       # input_image
+                gr.update(visible=True),        # fill_canvas_group
+                new_mode,                       # current_mode
+                gr.update(visible=False),       # low_threshold
+                gr.update(visible=False),       # high_threshold
+                gr.update(visible=False),       # detect_resolution
+                gr.update(visible=False),       # image_resolution
+                gr.update(visible=False),       # processor_id
+                gr.update(visible=False),       # reference_scale
+                gr.update(visible=False),       # prompt_embeds_scale_1
+                gr.update(visible=False),       # prompt_embeds_scale_2
+                gr.update(visible=False),       # pooled_prompt_embeds_scale_1
+                gr.update(visible=False),       # pooled_prompt_embeds_scale_2
+                steps_update,                   # steps
+                gr.update(value=30),           # guidance
+                gr.update(visible=False),       # control_image2
+                gr.update(visible=False),       # prompt2
+                gr.update(visible=True),        # mask_image
+                gr.update(visible=True),        # fill_controls
+                gr.update(visible=True),        # transfer_mask_btn
+                gr.update(visible=True)        # reference_image - OCULTO True solo para test
+            ]
+            
+    def prepare_mask_image(self, mask_image, for_visualization=False):
+        """Procesa una imagen de máscara para inpainting/outpainting."""
+        try:
+            if mask_image is None:
+                return None
+                
+            # Convertir a imagen PIL si es numpy array
+            # if isinstance(mask_image, np.ndarray):
+                # # Si tiene canal alpha (RGBA), usar ese como máscara
+                # if mask_image.shape[-1] == 4:
+                    # # Extraer el canal alpha
+                    # alpha = mask_image[:, :, 3]
+                    # mask = Image.fromarray(alpha)
+                # else:
+                    # # Convertir a escala de grises
+                    # mask = Image.fromarray(mask_image.astype('uint8')).convert('L')
+            # else:
+                # # Si ya es una imagen PIL
+                # mask = mask_image.convert('L')
+                
+            # Binarizar la máscara: blanco (255) donde se debe aplicar inpainting
+            threshold = 128
+            mask = mask.point(lambda p: 255 if p > threshold else 0)
+            
+            # Versión de numpy para procesamiento
+            processed_mask = np.array(mask)
+            
+            # Para visualización, convertir a RGB
+            if for_visualization and len(processed_mask.shape) == 2:
+                visual_mask = np.zeros((*processed_mask.shape, 3), dtype=np.uint8)
+                visual_mask[processed_mask > 0] = [255, 255, 255]
+                return visual_mask
+            
+            # Para el modelo, devolver directamente la máscara en escala de grises
+            return mask  # Devolver la imagen PIL en escala de grises
+            
+        except Exception as e:
+            self.logger.log(f"Error processing mask: {str(e)}")
+            return None
+            
+    # def update_reference_from_canvas(self, canvas_background):
+        # """Transfiere la imagen del canvas a reference_image automáticamente."""
+        # try:
+            # if canvas_background is not None:
+                # # Procesar como imagen si es necesario
+                # return canvas_background
+            # return None
+        # except Exception as e:
+            # self.logger.log(f"Error al actualizar reference_image: {str(e)}")
+            # return None
+            
     def toggle_reference_visibility(self, visible, current_processor):
         new_visible = not visible        
         button_text = "🙈 Hide" if new_visible else "👁️ Show"
-
-        if self.current_processor == "redux":
-            reference_image_update = gr.update(visible=False)
-            control_image2_update = gr.update(visible=new_visible, interactive=True)
-            # El prompt2 sigue el estado de visibilidad de control_image2
-            prompt2_update = gr.update(visible=new_visible)
-        else:
-            reference_image_update = gr.update(visible=new_visible, interactive=False)
-            control_image2_update = gr.update(visible=False, value=None, interactive=False)
+                
+        if self.current_processor == "canny" or self.current_processor == "depth":
+            reference_image_update = gr.update(visible=new_visible)
+            control_image2_update = gr.update(visible=False)
             prompt2_update = gr.update(visible=False)
-
+            mask_image_update = gr.update(visible=False)
+        elif self.current_processor == "redux":
+            reference_image_update = gr.update(visible=False)
+            control_image2_update = gr.update(visible=new_visible)
+            prompt2_update = gr.update(visible=new_visible)
+            mask_image_update = gr.update(visible=False)
+        elif self.current_processor == "fill":
+            reference_image_update = gr.update(visible=new_visible)
+            control_image2_update = gr.update(visible=False)
+            prompt2_update = gr.update(visible=False)
+            mask_image_update = gr.update(visible=new_visible)
+        
+        # IMPORTANTE: Añadir el botón actualizado de nuevo
+        button_update = gr.Button.update(value=button_text, variant="primary")
+        
         return (
             new_visible,
             reference_image_update,
             control_image2_update,
-            gr.Button.update(value=button_text, variant="primary"),
-            prompt2_update
+            button_update,  # Este valor es necesario para toggle_reference_btn
+            prompt2_update,
+            mask_image_update
         )
 
     def update_model_path(self, new_path, debug_enabled):
@@ -345,30 +828,36 @@ class FluxControlNetTab:
                 clear_memory()
         return self.model_path
 
-    def update_processor_and_model(self, processor_type):
-        if processor_type == "canny":
-            self.current_processor = "canny"
-            self.current_model = "flux1-Canny-Dev_FP8.safetensors"
-            self.default_processor_id = None
-        elif processor_type == "depth":
-            self.current_processor = "depth"
-            self.current_model = "flux1-Depth-Dev_FP8.safetensors"
-            self.default_processor_id = "depth_zoe"
-        elif processor_type == "redux":
-            self.current_processor = "redux"
-            self.current_model = "flux1-Dev_FP8.safetensors"
-            self.default_processor_id = None
+    # def update_processor_and_model(self, processor_type):
+        # if processor_type == "canny":
+            # self.current_processor = "canny"
+            # self.current_model = "flux1-Canny-Dev_FP8.safetensors"
+            # self.default_processor_id = None
+        # elif processor_type == "depth":
+            # self.current_processor = "depth"
+            # self.current_model = "flux1-Depth-Dev_FP8.safetensors"
+            # self.default_processor_id = "depth_zoe"
+        # elif processor_type == "redux":
+            # self.current_processor = "redux"
+            # self.current_model = "flux1-Dev_FP8.safetensors"
+            # self.default_processor_id = None
+        # elif processor_type == "fill":
+            # self.current_processor = "fill"
+            # self.current_model = "flux1-Fill-Dev_FP8.safetensors"
+            # self.default_processor_id = None
         
-        if self.pipe is not None:
-            del self.pipe
-            self.pipe = None
-            clear_memory()
-    
-        return [
-            gr.Button.update(variant="secondary" if processor_type == "canny" else "primary"),
-            gr.Button.update(variant="secondary" if processor_type == "depth" else "primary"),
-            gr.Button.update(variant="secondary" if processor_type == "redux" else "primary")
-        ]
+        # if self.pipe is not None:
+            # del self.pipe
+            # self.pipe = None
+            # clear_memory()
+        
+        # # Asegurar que todos los botones están visibles y actualizar variantes
+        # return [
+            # gr.Button.update(variant="secondary" if processor_type == "canny" else "primary", visible=True),
+            # gr.Button.update(variant="secondary" if processor_type == "depth" else "primary", visible=True),
+            # gr.Button.update(variant="secondary" if processor_type == "redux" else "primary", visible=True),
+            # gr.Button.update(variant="secondary" if processor_type == "fill" else "primary", visible=True)
+        # ]
 
     def get_processor(self):
         if self.current_processor == "canny":
@@ -377,6 +866,8 @@ class FluxControlNetTab:
             return
         elif self.current_processor == "redux":
             return 
+        elif self.current_processor == "fill":
+            return
         return # CannyDetector()  # Default to Canny
 
     def preprocess_image(self, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug_enabled, processor_id=None, width=None, height=None):
@@ -386,28 +877,20 @@ class FluxControlNetTab:
         
             debug_print("\nStarting preprocessing...", debug_enabled)
             
-            # Registrar tamaño original
-            if isinstance(input_image, np.ndarray):
-                original_height, original_width = input_image.shape[:2]
-                debug_print(f"Input image dimensions: {original_width}x{original_height}", debug_enabled)
-            
             # Cargar y validar imagen
             control_image = self.load_control_image(input_image)
             if not control_image:
                 raise ValueError("Failed to load control image")
-            
-            # Registrar tamaño después de cargar
-            debug_print(f"Control image size after loading: {control_image.size}", debug_enabled)
-                
+                    
             # Convertir a RGB si es necesario
             if control_image.mode != 'RGB':
                 control_image = control_image.convert('RGB')
-            
-            # Guardar las dimensiones originales
+                
+            # Guardar las dimensiones originales o usar las especificadas
             original_width, original_height = control_image.size
             target_width = width if width is not None else original_width
             target_height = height if height is not None else original_height
-            
+                
             # Aplicar preprocesamiento según el modo
             if self.current_processor == "canny":
                 processor = CannyDetector()
@@ -419,39 +902,23 @@ class FluxControlNetTab:
                     image_resolution=int(image_resolution)
                 )
             elif self.current_processor == "depth":
-                from PIL import Image
+                from PIL import Image  # Importar aquí para evitar errores
                 actual_processor_id = processor_id or 'depth_zoe'
                 processor = Processor(actual_processor_id)
-                
-                # Registrar antes del procesamiento
-                debug_print(f"Before depth processing, image size: {control_image.size}", debug_enabled)
-                
-                # Procesar la imagen
                 processed_image = processor(control_image)
                 
-                # Registrar después del procesamiento
+                # Redimensionar usando BICUBIC para mejor calidad
                 if isinstance(processed_image, Image.Image):
-                    debug_print(f"After depth processing, image size: {processed_image.size}", debug_enabled)
-                elif isinstance(processed_image, np.ndarray):
-                    debug_print(f"After depth processing, image shape: {processed_image.shape}", debug_enabled)
-                
-                # Forzar las dimensiones originales o las especificadas
-                if isinstance(processed_image, Image.Image):
-                    processed_image = processed_image.resize((target_width, target_height))
+                    processed_image = processed_image.resize((target_width, target_height), Image.BICUBIC)
                 elif isinstance(processed_image, np.ndarray):
                     pil_img = Image.fromarray(processed_image)
-                    pil_img = pil_img.resize((target_width, target_height))
+                    pil_img = pil_img.resize((target_width, target_height), Image.BICUBIC)
                     processed_image = np.array(pil_img)
-                
-                # Verificar el tamaño final
-                if isinstance(processed_image, Image.Image):
-                    debug_print(f"Final image size: {processed_image.size}", debug_enabled)
-                elif isinstance(processed_image, np.ndarray):
-                    debug_print(f"Final image shape: {processed_image.shape}", debug_enabled)
-            
+                    
+                debug_print(f"Depth image resized to: {target_width}x{target_height} using BICUBIC", debug_enabled)
             else:
                 processed_image = control_image
-                
+                    
             debug_print("\nPreprocess Done.", debug_enabled)
             return np.array(processed_image)
             
@@ -459,8 +926,6 @@ class FluxControlNetTab:
             self.logger.log(f"\nError en el preprocesamiento: {str(e)}")
             self.logger.log(f"Stacktrace:\n{traceback.format_exc()}")
             return None
-            
-
 
     def load_models(self, use_hyper_flux=True, debug_enabled=False):  #Text_encoders + vae
         debug_print("\nStarting model loading...", debug_enabled)
@@ -468,17 +933,17 @@ class FluxControlNetTab:
         
         debug_print("\nLoading CLIP text encoder...", debug_enabled)
         text_encoder = CLIPTextModel.from_pretrained(
-            self.model_path, subfolder="text_encoder", torch_dtype=dtype
+            self.text_encoders_path, subfolder="text_encoder", torch_dtype=dtype
         )
         
         debug_print("\nLoading T5 text encoder...", debug_enabled)
         text_encoder_2 = T5EncoderModel.from_pretrained(
-            self.model_path, subfolder="text_encoder_2", torch_dtype=dtype
+            self.text_encoders_path, subfolder="text_encoder_2", torch_dtype=dtype
         )
         
         debug_print("\nLoading VAE...", debug_enabled)
         vae = AutoencoderKL.from_pretrained(
-            self.model_path, subfolder="vae", torch_dtype=dtype
+            self.text_encoders_path, subfolder="vae", torch_dtype=dtype
         )
       
         debug_print("\nLoading tokenizers...", debug_enabled)
@@ -493,23 +958,24 @@ class FluxControlNetTab:
             self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
             self.current_model = self.current_model or "flux1-Canny-Dev_FP8.safetensors"
             base_model = os.path.join(self.checkpoint_path, self.current_model)
-        if self.current_processor == "depth":
+        elif self.current_processor == "depth":
             self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
             self.current_model = self.current_model or "flux1-Depth-Dev_FP8.safetensors"
             base_model = os.path.join(self.checkpoint_path, self.current_model)
-        if self.current_processor == "redux":
+        elif self.current_processor == "redux":
             self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
             self.current_model = self.current_model or "flux1-Dev_FP8.safetensors"
             base_model = os.path.join(self.checkpoint_path, self.current_model)
+        elif self.current_processor == "fill":
+            self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
+            self.current_model = self.current_model or "flux1-Fill-Dev_FP8.safetensors"
+            base_model = os.path.join(self.checkpoint_path, self.current_model)
+        else:
+            # Por defecto, usar Canny
+            self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
+            self.current_model = "flux1-Canny-Dev_FP8.safetensors"
+            base_model = os.path.join(self.checkpoint_path, self.current_model)
            
-        #debug_print("\nCargando modelo principal Flux ControlNet...", debug_enabled)
-        #if self.current_processor == "canny":
-        #    base_model = os.path.join("./models/Stable-diffusion/flux1-Canny-Dev_FP8.safetensors")
-        #if self.current_processor == "depth":
-        #    base_model = os.path.join("./models/Stable-diffusion/flux1-Depth-Dev_FP8.safetensors")
-        #if self.current_processor == "redux":
-        #    base_model = os.path.join("./models/Stable-diffusion/flux1-Dev_FP8.safetensors")
-        
         if self.current_processor in ["canny", "depth"]:
             pipe = FluxControlPipeline.from_single_file(
                 base_model,
@@ -529,24 +995,24 @@ class FluxControlNetTab:
                 if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
                     lora1_path = os.path.join(self.lora_dir, self.lora1_model)
                     if os.path.exists(lora1_path):
-                        debug_print(f"\nLoading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
-                        self.logger.log(f"Loading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
+                        debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
                         pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
                         pipe.fuse_lora(lora_scale=float(self.lora1_scale))
                 
                 if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
                     lora2_path = os.path.join(self.lora_dir, self.lora2_model)
                     if os.path.exists(lora2_path):
-                        debug_print(f"\nLoading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
-                        self.logger.log(f"Loading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
+                        debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
                         pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
                         pipe.fuse_lora(lora_scale=float(self.lora2_scale))
                 
                 if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
                     lora3_path = os.path.join(self.lora_dir, self.lora3_model)
                     if os.path.exists(lora3_path):
-                        debug_print(f"\nLoading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
-                        self.logger.log(f"Loading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
+                        debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
                         pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
                         pipe.fuse_lora(lora_scale=float(self.lora3_scale))
             except Exception as e:
@@ -554,7 +1020,50 @@ class FluxControlNetTab:
                 debug_print(error_msg, debug_enabled)
                 self.logger.log(error_msg)
             
-        if self.current_processor == "redux":
+        elif self.current_processor == "fill":   
+            pipe = FluxFillPipeline.from_single_file(
+                base_model,
+                text_encoder=text_encoder,
+                text_encoder_2=text_encoder_2,
+                tokenizer=tokenizer,
+                tokenizer_2=tokenizer_2,
+                vae=vae,
+                torch_dtype=dtype
+            )
+            if use_hyper_flux:
+                pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
+                pipe.fuse_lora(lora_scale=0.125)
+                
+            try:
+                if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
+                    lora1_path = os.path.join(self.lora_dir, self.lora1_model)
+                    if os.path.exists(lora1_path):
+                        debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
+                        pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora1_scale))
+                
+                if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
+                    lora2_path = os.path.join(self.lora_dir, self.lora2_model)
+                    if os.path.exists(lora2_path):
+                        debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
+                        pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora2_scale))
+                
+                if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
+                    lora3_path = os.path.join(self.lora_dir, self.lora3_model)
+                    if os.path.exists(lora3_path):
+                        debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
+                        pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
+                        pipe.fuse_lora(lora_scale=float(self.lora3_scale))
+            except Exception as e:
+                error_msg = f"Error loading custom LoRAs: {str(e)}"
+                debug_print(error_msg, debug_enabled)
+                self.logger.log(error_msg)
+            
+        elif self.current_processor == "redux":
             pipe = FluxPipeline.from_single_file(
                 base_model,
                 text_encoder=text_encoder,
@@ -573,34 +1082,30 @@ class FluxControlNetTab:
                 if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
                     lora1_path = os.path.join(self.lora_dir, self.lora1_model)
                     if os.path.exists(lora1_path):
-                        debug_print(f"\nLoading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
-                        self.logger.log(f"Loading LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
+                        debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
                         pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
                         pipe.fuse_lora(lora_scale=float(self.lora1_scale))
                 
                 if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
                     lora2_path = os.path.join(self.lora_dir, self.lora2_model)
                     if os.path.exists(lora2_path):
-                        debug_print(f"\nLoading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
-                        self.logger.log(f"Loading LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
+                        debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
                         pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
                         pipe.fuse_lora(lora_scale=float(self.lora2_scale))
                 
                 if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
                     lora3_path = os.path.join(self.lora_dir, self.lora3_model)
                     if os.path.exists(lora3_path):
-                        debug_print(f"\nLoading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
-                        self.logger.log(f"Loading LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
+                        debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
+                        self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
                         pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
                         pipe.fuse_lora(lora_scale=float(self.lora3_scale))
             except Exception as e:
                 error_msg = f"Error al cargar LoRAs personalizados: {str(e)}"
                 debug_print(error_msg, debug_enabled)
                 self.logger.log(error_msg)
-                
-            # Continuar con el LoRA predeterminado de Redux
-            #pipe.load_lora_weights("./models/lora/pyros_flux_atj.safetensors", lora_scale=1.500)
-            #pipe.fuse_lora(lora_scale=1.000)
         
         debug_print("\nQuantizing main transformer...", debug_enabled)
         pipe.transformer = quantize_model_to_nf4(pipe.transformer, "Transformer principal", debug_enabled)
@@ -640,24 +1145,6 @@ class FluxControlNetTab:
         except Exception as e:
             self.logger.log(f"Error loading control image: {str(e)}")
             return Image.new('RGB', (512, 512), color='white')
-            #default_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png"
-            
-            #if os.path.exists(default_path):
-            #    return load_image(default_path)
-            
-            # Crear imagen blanca si no existe el archivo
-            #white_image = Image.new('RGB', (512, 512), color='white')
-            
-            #return white_image
-            
-            #return load_image(default_path)
-            
-            #if not os.path.exists(default_path):
-            #    raise FileNotFoundError(f"Default image not found at {default_path}")
-            #return load_image(default_path)
-        except Exception as e:
-            self.logger.log(f"Error loading control image: {str(e)}")
-            return Image.new('RGB', (512, 512), color='white')
 
     def generate(
         self, prompt, prompt2, input_image, width, height, steps, guidance, 
@@ -666,10 +1153,10 @@ class FluxControlNetTab:
         prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1, 
         pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, text_encoder, text_encoder_2, 
         tokenizer, tokenizer_2, debug_enabled, output_dir, lora1_model, lora1_scale, 
-        lora2_model, lora2_scale, lora3_model, lora3_scale):
+        lora2_model, lora2_scale, lora3_model, lora3_scale, mask_image, fill_mode="Inpaint"):
         try:
             debug_print("\nStarting inference...", debug_enabled)
-            
+            from PIL import Image
             # Guardar los valores de LoRA como atributos de clase
             self.lora1_model = lora1_model
             self.lora1_scale = lora1_scale
@@ -727,7 +1214,48 @@ class FluxControlNetTab:
                 debug_print("Reutilizando modelo cargado previamente", debug_enabled)
             
             control_image = self.load_control_image(input_image)
-            if self.current_processor == "canny":
+            
+            # La generación de semilla se manejará en generate_with_state para cada imagen
+            seed_value = int(seed) if seed is not None else 0
+            
+            if self.current_processor == "fill":
+                # Modo Fill para inpainting/outpainting
+                menupro = "fill"
+                
+                with torch.inference_mode():
+                    self.logger.log("Starting generation process...")
+                    
+                    # Asegurarnos que la imagen base y la máscara están en el formato correcto
+                    base_image = self.load_control_image(reference_image)
+                    
+                    # Convertir la máscara a PIL si no lo es ya
+                    
+                    mask_img = mask_image
+                    if isinstance(mask_img, np.ndarray):
+                        mask_img = Image.fromarray(mask_img.astype('uint8'))
+                    if mask_img.mode != 'L':
+                        mask_img = mask_img.convert('L')
+                    
+                    # Verificar que ambas tienen el mismo tamaño
+                    if base_image.size != mask_img.size:
+                        self.logger.log(f"Resizing mask to match image: {base_image.size}")
+                        mask_img = mask_img.resize(base_image.size)
+                        
+                    self.logger.log(f"Image mode: {base_image.mode}, Mask mode: {mask_img.mode}")
+                    
+                    result = self.pipe(
+                        prompt=prompt,
+                        image=base_image,       # Usa reference_image como base
+                        mask_image=mask_img,    # Usa mask_image como máscara
+                        height=height,
+                        width=width,
+                        num_inference_steps=int(steps),
+                        guidance_scale=guidance,
+                        generator=create_generator(seed_value)
+                    )
+                    self.logger.log("Generation completed")
+                
+            elif self.current_processor == "canny":
                 menupro = "canny"
                 processor = self.get_processor()
                 control_image = processor(
@@ -737,32 +1265,6 @@ class FluxControlNetTab:
                     detect_resolution=int(detect_resolution),
                     image_resolution=int(image_resolution)
                 )
-            if self.current_processor == "depth":
-                from PIL import Image  # Importar PIL.Image si no está importado globalmente
-                menupro = "depth"
-                processor = Processor(processor_id)
-                
-                # Procesar la imagen
-                control_image = processor(control_image)
-                
-                # Guardar el tamaño original o el especificado por el usuario
-                target_width, target_height = width, height
-                
-                # Redimensionar la imagen procesada a las dimensiones especificadas
-                if isinstance(control_image, Image.Image):
-                    control_image = control_image.resize((target_width, target_height))
-                elif isinstance(control_image, np.ndarray):
-                    pil_img = Image.fromarray(control_image)
-                    pil_img = pil_img.resize((target_width, target_height))
-                    control_image = np.array(pil_img)
-                    
-                self.logger.log(f"Depth image resized to: {target_width}x{target_height}")
-            
-            # La generación de semilla se manejará en generate_with_state para cada imagen
-            # y se pasará el valor aquí, ya no se modifica en este método
-            seed_value = int(seed) if seed is not None else 0
-                
-            if self.current_processor == "canny":
                 with torch.inference_mode():
                     self.logger.log("Starting generation process...")
                     result = self.pipe(
@@ -777,9 +1279,48 @@ class FluxControlNetTab:
                     self.logger.log("Generation completed")
                         
             elif self.current_processor == "depth":
+                menupro = "depth"
+                from PIL import Image
                 
-            
-            
+                # Log de debug para ver las dimensiones originales
+                if isinstance(control_image, Image.Image):
+                    self.logger.log(f"Original control_image dimensions: {control_image.size}")
+                elif isinstance(control_image, np.ndarray):
+                    self.logger.log(f"Original control_image dimensions: {control_image.shape}")
+                
+                # Procesar la imagen de forma controlada
+                processor = Processor(processor_id)
+                processed_control = processor(control_image).convert("RGB")
+                
+                # Asegurarnos de que la imagen procesada tenga el tamaño exacto deseado
+                if isinstance(processed_control, Image.Image):
+                    # Si ya está en formato PIL, redimensionar con alta calidad
+                    current_size = processed_control.size
+                    self.logger.log(f"Processed depth image size before resize: {current_size}")
+                    if current_size != (width, height):
+                        control_image = processed_control.resize((width, height), Image.BICUBIC)
+                        self.logger.log(f"Resized to {width}x{height} using BICUBIC")
+                    else:
+                        control_image = processed_control
+                        self.logger.log("No resize needed - image already correct size")
+                elif isinstance(processed_control, np.ndarray):
+                    # Si es numpy array, convertir a PIL para mejor redimensionamiento
+                    pil_img = Image.fromarray(processed_control)
+                    current_size = pil_img.size
+                    self.logger.log(f"Processed depth image size before resize: {current_size}")
+                    if current_size != (width, height):
+                        pil_img = pil_img.resize((width, height), Image.BICUBIC)
+                        self.logger.log(f"Resized to {width}x{height} using BICUBIC")
+                    control_image = pil_img  # Mantener como PIL Image
+                
+
+                self.logger.log(f"Final image type: {type(control_image)}")
+                if isinstance(control_image, Image.Image):
+                    self.logger.log(f"Final image size: {control_image.size}")
+                elif isinstance(control_image, np.ndarray):
+                    self.logger.log(f"Final image shape: {control_image.shape}")
+                
+                
                 with torch.inference_mode():
                     self.logger.log("Starting generation process...")
                     result = self.pipe(
@@ -792,6 +1333,7 @@ class FluxControlNetTab:
                         generator=create_generator(seed_value)
                     )
                     self.logger.log("Generation completed")
+            
                 
             elif self.current_processor == "redux":
                 self.logger.log("Starting Redux process...")
@@ -803,6 +1345,7 @@ class FluxControlNetTab:
                     tokenizer_2=self.pipe.tokenizer_2,
                     torch_dtype=torch.bfloat16
                 ).to(device)
+                    
                     
                 my_prompt = prompt
                 my_prompt2 = prompt2 if prompt2 else prompt  # Aseguramos que prompt2 tenga un valor
@@ -849,19 +1392,25 @@ class FluxControlNetTab:
             # Guardar la imagen
             output_directory = self.output_dir
             os.makedirs(output_directory, exist_ok=True)
-            timestamp = datetime.now().strftime("%y_%m_%d_%H%M%S")  # Added hours, minutes, seconds
+            timestamp = datetime.now().strftime("%y_%m_%d_%H%M%S") 
             mode_map = {
                 "canny": "canny",
                 "depth": "depth",
-                "redux": "redux"
+                "redux": "redux",
+                "fill": "fill"
             }
-            
             filename = f"{mode_map[self.current_processor]}_{seed_value}_{timestamp}.png"
             file_path = os.path.join(output_directory, filename)
             
             result_image = result.images[0]
             result_image.save(file_path)
             self.logger.log(f"Image saved in: {file_path}")
+            
+            if torch.cuda.is_available():
+                # Limpieza suave para evitar problemas con generaciones futuras
+                torch.cuda.empty_cache()
+            gc.collect()
+                        
             return result.images[0]
             
         except Exception as e:
@@ -876,13 +1425,41 @@ def on_ui_tabs():
         initial_checkpoints = settings["checkpoint_path"]
         initial_output = settings["output_dir"]
         initial_lora = settings["lora_dir"]
+        initial_text_encoders = settings.get("text_encoders_path", "./models/Stable-diffusion/text_encoders_FP8")
     else:
         initial_checkpoints = "./models/stable-diffusion/"
         initial_output = "./outputs/fluxcontrolnet/"
         initial_lora = "./models/lora/"
+        initial_text_encoders = "./models/Stable-diffusion/text_encoders_FP8"
     
-    #with gr.Blocks(analytics_enabled=False) as flux_interface:
-    with gr.Blocks() as flux_interface:
+    css = """
+        /* Reducir el ancho de los checkboxes y etiquetas */
+        .fill-controls-container .gr-checkbox-container {
+            min-width: 60px !important;
+            max-width: 60px !important;
+        }
+        
+        /* Reducir el ancho del dropdown */
+        .fill-controls-container .gr-dropdown {
+            min-width: 80px !important;
+            max-width: 80px !important;
+        }
+        
+        /* Reducir el ancho del botón */
+        .fill-controls-container .gr-button {
+            min-width: 70px !important;
+            max-width: 70px !important;
+            padding: 2px 8px !important;
+        }
+        
+        /* Alinear las etiquetas y reducir tamaño de texto */
+        .fill-controls-container label {
+            font-size: 0.85em !important;
+            margin-bottom: 2px !important;
+        }
+    """
+   
+    with gr.Blocks(analytics_enabled=False, head=canvas_head) as flux_interface: 
         with gr.Row():
             extension_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             logo_path = os.path.join('file=', extension_path, 'assets', 'logo.png')
@@ -903,15 +1480,16 @@ def on_ui_tabs():
                 """
             )
         with gr.Row():
-            gr.Column(scale=2)
-            with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
-                canny_btn = gr.Button("Canny", variant="secondary")
-            with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
-                depth_btn = gr.Button("Depth", variant="primary")    
-            with gr.Column(scale=1):  # Este column ocupará 1/5 del espacio
-                redux_btn = gr.Button("Redux", variant="primary")    
-            gr.Column(scale=2) 
-            
+            #gr.Column(scale=0.2)
+            with gr.Column(scale=1):
+                canny_btn = gr.Button("Canny", variant="secondary", visible=True)
+            with gr.Column(scale=1):
+                depth_btn = gr.Button("Depth", variant="primary", visible=True)
+            with gr.Column(scale=1):
+                redux_btn = gr.Button("Redux", variant="primary", visible=True)
+            with gr.Column(scale=1):
+                fill_btn = gr.Button("Fill", variant="primary", visible=True)    
+
         reference_visible = gr.State(value=True)
 
         with gr.Row():
@@ -931,22 +1509,48 @@ def on_ui_tabs():
                     print(f"Error loading image: {str(e)}")
                     return None
 
-        # Luego definimos el componente input_image con los parámetros mejorados
-            input_image = gr.Image(
-                label="Control Image", 
-                source="upload", 
+            with gr.Group(elem_id="input_image_container"):
+                # Input image para los modos que no son "fill"
+                input_image = gr.Image(
+                    label="Control Image", 
+                    sources=["upload", "clipboard"],  
+                    type="numpy",
+                    interactive=True,
+                    scale=1,
+                    every=1,
+                    container=True,
+                    image_mode='RGB',
+                    visible=True,  # Inicialmente visible
+                    elem_id="normal_input_image"
+                )
+                
+                # Canvas para el modo "fill"
+                #fill_canvas_label = gr.Markdown("Base Image (Draw mask)", visible=False)
+                with gr.Group(visible=False, elem_id="fill_canvas_container") as fill_canvas_group:
+                    fill_canvas = ForgeCanvas(
+                        elem_id="Fill_Mode_Canvas", 
+                        #height=512, 
+                        scribble_color="#FFFFFF",
+                        scribble_color_fixed=True, 
+                        scribble_alpha=100, 
+                        scribble_alpha_fixed=True, 
+                        scribble_softness_fixed=True
+                    )
+            
+            # Imagen para máscara en el modo Fill
+            mask_image = gr.Image(
+                label="Mask Image (white areas will be inpaint/outpaint)",
+                sources=["upload", "clipboard"],
                 type="numpy",
-                interactive=True,
+                interactive=False,
+                visible=False,
                 scale=1,
-                #height=512,  # Aumentamos la altura
-                #width=512,   # Especificamos el ancho
-                every=1,
-                container=True,  # Esto ayuda con el escalado
-                image_mode='RGB'
+                elem_id="mask_image"
             )
+            
             control_image2 = gr.Image(
                 label="Control Image 2", 
-                source="upload", 
+                sources=["upload", "clipboard"],
                 type="numpy",
                 interactive=True,
                 visible=False,
@@ -964,12 +1568,12 @@ def on_ui_tabs():
                 object_fit="contain",
                 columns=1,
                 rows=1,
-                #height=768,
-                #width=768
             )
             
             selected_image = gr.State() 
-              
+            current_mode = gr.State("canny")
+            
+             
         with gr.Row():
             with gr.Column(scale=1):
                 get_dimensions_btn = gr.Button("📐 Get Image Dimensions")
@@ -985,6 +1589,49 @@ def on_ui_tabs():
             with gr.Column(scale=1):    
                 generate_btn = gr.Button("⚡ Generate", variant="primary")
                 
+        with gr.Row(visible=False, elem_classes="fill-controls-container") as fill_controls:
+        
+            with gr.Column(scale=0, visible=False):
+                fill_mode = gr.Dropdown(
+                    label="Fill Mode",
+                    choices=["Inpaint", "Outpaint"],
+                    value="Inpaint",
+                    visible=False
+                )
+
+            with gr.Column(scale=0.4, min_width=40):
+                expand_range = gr.Slider(
+                    label="Expansion Range:",  # Etiqueta más corta
+                    minimum=0,
+                    maximum=512,
+                    
+                    value=0,
+                    step=64
+                )
+            
+            with gr.Column(scale=0.4, min_width=40):
+                mask_blur = gr.Slider(
+                    label="Mask Blur",
+                    minimum=0,
+                    maximum=128,
+                    value=16,
+                    step=1
+                )
+            
+            with gr.Column(scale=0.2, min_width=40):
+                expand_up = gr.Checkbox(label="Expand Up ↑", value=False)
+            
+            with gr.Column(scale=0.2, min_width=40):
+                expand_down = gr.Checkbox(label="Expand Down ↓", value=False) 
+            
+            with gr.Column(scale=0.2, min_width=40):
+                expand_left = gr.Checkbox(label="Expand Left ←", value=False) 
+            
+            with gr.Column(scale=0.2, min_width=40):
+                expand_right = gr.Checkbox(label="Expand Right →", value=False) 
+                
+            with gr.Column(scale=0.3, min_width=40):    
+                transfer_mask_btn = gr.Button("Preview Mask", visible=False)                 
       
         with gr.Row():
             with gr.Column(scale=3):
@@ -999,12 +1646,9 @@ def on_ui_tabs():
                     value="", 
                     interactive=False,
                     show_label=True,
-                    show_progress=True,
+                    #show_progress=True,
                     visible=True
                 )
-        
-        # New row for LoRA selectors
-        
         
                
         with gr.Row():
@@ -1020,31 +1664,31 @@ def on_ui_tabs():
             # LoRA 1
             lora1_model = gr.Dropdown(
                 choices=list_lora_files(flux_tab.lora_dir), 
-                label="Custom LoRA 1", 
+                label="Custom LoRA 1:", 
                 value="None", 
                 scale=2
             )
-            lora1_scale = gr.Slider(label="Strength LoRA 1", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
+            lora1_scale = gr.Slider(label="Strength L1", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
             
             # LoRA 2
             lora2_model = gr.Dropdown(
                 choices=list_lora_files(flux_tab.lora_dir), 
-                label="Custom LoRA 2", 
+                label="Custom LoRA 2:", 
                 value="None", 
                 scale=2
             )
-            lora2_scale = gr.Slider(label="Strength LoRA 2", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
+            lora2_scale = gr.Slider(label="Strength L2", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
             
             # LoRA 3
             lora3_model = gr.Dropdown(
                 choices=list_lora_files(flux_tab.lora_dir), 
-                label="Custom LoRA 3", 
+                label="Custom LoRA 3:", 
                 value="None", 
                 scale=2
             )
-            lora3_scale = gr.Slider(label="Strength LoRA 3", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
+            lora3_scale = gr.Slider(label="Strength L3", minimum=-2.0, maximum=3.0, value=1.0, step=0.1, scale=1)
             
-            refresh_all_loras_btn = gr.Button("🔄 Refresh LoRA Folder", size="sm", scale=0.5)
+            refresh_all_loras_btn = gr.Button("🔄 Refresh LoRa folder", size="sm", scale=0.5)
                 
         with gr.Row():
             low_threshold = gr.Slider(label="Low Threshold:", minimum=0, maximum=256, value=50, step=1, visible=True)
@@ -1116,29 +1760,43 @@ def on_ui_tabs():
                 
         with gr.Accordion("Advanced Settings", open=False):
             with gr.Row():
-                with gr.Column(scale=5):
+                gr.Column(scale=1)
+                with gr.Column(scale=1):
+                    # Añadir un elemento de texto para mostrar el estado del token
                     hf_token = gr.Textbox(
-                        label="Hugging Face Read Token:",
+                        label="Hugging Face Read Token :",
                         placeholder="Enter your Hugging Face token...",
                         type="password"
                     )
-            with gr.Row():
+                with gr.Column(scale=1):    
+                    
+                    hf_token_status = gr.Markdown(
+                        value=check_existing_token(),  # Usamos la función directamente al inicializar
+                        elem_id="hf_token_status"
+                    )
                 gr.Column(scale=1)
+                    
+                    
+            with gr.Row():
+                
                 gr.Column(scale=1)
                 with gr.Column(scale=1):
                     save_settingsHF_btn = gr.Button("Save HF Token:", variant="primary")
-                gr.Column(scale=1)
+                with gr.Column(scale=1):
+                    check_token_btn = gr.Button("Check Current Token", variant="primary")
                 gr.Column(scale=1)        
             
             settings = load_settings() or {}
             checkpoint_value = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             output_value = settings.get("output_dir", "./outputs/fluxcontrolnet/")
             lora_value = settings.get("lora_dir", "./models/lora/")
+            text_encoders_value = settings.get("text_encoders_path", "./models/Stable-diffusion/text_encoders_FP8")
             
             with gr.Row():
-                ckpt_display = gr.Markdown(f"Latest checkpoints path: `{checkpoint_value}`")
-                outp_display = gr.Markdown(f"Latest images output dir: `{output_value}`")
-                lora_display = gr.Markdown(f"Latest LoRA path: `{lora_value}`")
+                ckpt_display = gr.Markdown(f"Current checkpoints path: `{checkpoint_value}`")
+                outp_display = gr.Markdown(f"Current images output dir: `{output_value}`")
+                lora_display = gr.Markdown(f"Current LoRA path: `{lora_value}`")
+                text_encoders_display = gr.Markdown(f"Current text encoders path: `{text_encoders_value}`")
        
             with gr.Row():
                 
@@ -1158,6 +1816,12 @@ def on_ui_tabs():
                     label="LoRA_Path :",
                     value=lora_value,
                     placeholder="Enter LoRA path..."
+                )
+                
+                text_encoders_path = gr.Textbox(
+                    label="Text_Encoders_Path :",
+                    value=text_encoders_value,
+                    placeholder="Enter text encoders path..."
                 )
                             
             with gr.Row():
@@ -1182,16 +1846,18 @@ def on_ui_tabs():
             #botones
             
             # Función wrapper para actualizar la instancia al guardar
-            def save_settings_wrapper(checkpoint_path_val, output_dir_val, lora_dir_val, debug_val):
-                log_msg, new_cp, new_od, new_lora = save_settings(
+            def save_settings_wrapper(checkpoint_path_val, output_dir_val, lora_dir_val, text_encoders_path_val, debug_val):
+                log_msg, new_cp, new_od, new_lora, new_text_encoders = save_settings(
                     checkpoint_path_val, 
                     output_dir_val,
                     lora_dir_val,
+                    text_encoders_path_val,
                     debug_val
                 )
                 flux_tab.checkpoint_path = new_cp
                 flux_tab.output_dir = new_od
                 flux_tab.lora_dir = new_lora
+                flux_tab.text_encoders_path = new_text_encoders
                 
                 # Actualizar las listas de LoRAs
                 new_lora_choices = list_lora_files(new_lora)
@@ -1201,21 +1867,23 @@ def on_ui_tabs():
                     new_cp,            # checkpoint_path
                     new_od,            # output_dir
                     new_lora,          # lora_dir
+                    new_text_encoders, # text_encoders_path
                     gr.update(choices=new_lora_choices),  # lora1_model
                     gr.update(choices=new_lora_choices),  # lora2_model
                     gr.update(choices=new_lora_choices),  # lora3_model
                     gr.Markdown.update(value=f"Latest checkpoints path: `{new_cp}`"),
                     gr.Markdown.update(value=f"Latest images output dir: `{new_od}`"),
-                    gr.Markdown.update(value=f"Latest LoRA path: `{new_lora}`")
+                    gr.Markdown.update(value=f"Latest LoRA path: `{new_lora}`"),
+                    gr.Markdown.update(value=f"Latest text encoders path: `{new_text_encoders}`")
                 ]
             
             save_settings_btn.click(
                 fn=save_settings_wrapper,
-                inputs=[checkpoint_path, output_dir, lora_dir, debug],
+                inputs=[checkpoint_path, output_dir, lora_dir, text_encoders_path, debug],
                 outputs=[
-                    log_box, checkpoint_path, output_dir, lora_dir,
+                    log_box, checkpoint_path, output_dir, lora_dir, text_encoders_path,
                     lora1_model, lora2_model, lora3_model,
-                    ckpt_display, outp_display, lora_display
+                    ckpt_display, outp_display, lora_display, text_encoders_display
                 ]
             )
 
@@ -1225,105 +1893,12 @@ def on_ui_tabs():
                 outputs=[log_box]
             )
        
-            #use_default.click(fn=lambda: load_image("./extensions/sd-forge-fluxcontrolnet/assets/default.png"), outputs=[input_image])
             get_dimensions_btn.click(
-                fn=update_dimensions,
-                inputs=[input_image, width, height],
+                fn=lambda img, canvas_bg, mode, w, h: update_dimensions(img, canvas_bg, mode, w, h),
+                inputs=[input_image, fill_canvas.background, current_mode, width, height],
                 outputs=[width, height]
             )
-        def on_processor_change(mode, use_hyper_flux, input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, reference_visible):
-            flux_tab.update_processor_and_model(mode)
-            
-            button_text = "🙈 Hide" if reference_visible else "👁️ Show"
-            
-            # Procesamos la imagen si existe una imagen de entrada
-            processed_image = None
-            if input_image is not None:
-                if mode == "canny":
-                    processor = CannyDetector()
-                    temp_image = flux_tab.load_control_image(input_image)
-                    processed_image = processor(
-                        temp_image,
-                        low_threshold=int(low_threshold),
-                        high_threshold=int(high_threshold),
-                        detect_resolution=int(detect_resolution),
-                        image_resolution=int(image_resolution)
-                    )
-                # elif mode == "depth":
-                    # processor = Processor('depth_zoe')
-                    # temp_image = flux_tab.load_control_image(input_image)
-                    # processed_image = processor(temp_image)
-                    
-            # Convertimos el resultado a numpy array si es necesario
-            if processed_image is not None and not isinstance(processed_image, np.ndarray):
-                processed_image = np.array(processed_image)
-            
-            if mode == "redux":
-                ctrl_updates = [
-                    gr.update(visible=False),   # low_threshold
-                    gr.update(visible=False),   # high_threshold
-                    gr.update(visible=False),   # detect_resolution
-                    gr.update(visible=False),   # image_resolution
-                    gr.update(visible=False),   # processor_id
-                    gr.update(visible=True),    # reference_scale
-                    gr.update(visible=True),    # prompt_embeds_scale_1
-                    gr.update(visible=True),    # prompt_embeds_scale_2
-                    gr.update(visible=True),    # pooled_prompt_embeds_scale_1
-                    gr.update(visible=True),    # pooled_prompt_embeds_scale_2
-                    gr.update(value=30 if not use_hyper_flux else 8),  # steps
-                    gr.update(value=3.5),       # guidance
-                    gr.update(visible=False),   # reference_image
-                    gr.update(visible=reference_visible),    # control_image2
-                    gr.update(visible=reference_visible),    # prompt2 - ahora sigue el estado de reference_visible
-                    gr.Button.update(value=button_text, variant="primary")  # toggle_button
-                ]
-            elif mode == "canny":
-                ctrl_updates = [
-                    gr.update(visible=True),    # low_threshold
-                    gr.update(visible=True),    # high_threshold
-                    gr.update(visible=True),    # detect_resolution
-                    gr.update(visible=True),    # image_resolution
-                    gr.update(visible=False),   # processor_id
-                    gr.update(visible=False),   # reference_scale
-                    gr.update(visible=False),   # prompt_embeds_scale_1
-                    gr.update(visible=False),   # prompt_embeds_scale_2
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
-                    gr.update(value=30 if not use_hyper_flux else 8),  # steps
-                    gr.update(value=30),        # guidance
-                    gr.update(value=processed_image, visible=reference_visible),  # reference_image
-                    gr.update(visible=False),   # control_image2
-                    gr.update(visible=False),   # prompt2
-                    gr.Button.update(value=button_text, variant="primary")  # toggle_button
-                ]
-            else:  # depth
-                ctrl_updates = [
-                    gr.update(visible=False),   # low_threshold
-                    gr.update(visible=False),   # high_threshold
-                    gr.update(visible=False),   # detect_resolution
-                    gr.update(visible=False),   # image_resolution
-                    gr.update(visible=True, value='depth_zoe'),  # processor_id
-                    gr.update(visible=False),   # reference_scale
-                    gr.update(visible=False),   # prompt_embeds_scale_1
-                    gr.update(visible=False),   # prompt_embeds_scale_2
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_1
-                    gr.update(visible=False),   # pooled_prompt_embeds_scale_2
-                    gr.update(value=30 if not use_hyper_flux else 8),  # steps
-                    gr.update(value=30),        # guidance
-                    gr.update(value=processed_image, visible=reference_visible),  # reference_image
-                    gr.update(visible=False),   # control_image2
-                    gr.update(visible=False),   # prompt2
-                    gr.Button.update(value=button_text, variant="primary")  # toggle_button
-                ]
-
-            button_updates = [
-                gr.Button.update(variant="secondary" if mode == "canny" else "primary"),
-                gr.Button.update(variant="secondary" if mode == "depth" else "primary"),
-                gr.Button.update(variant="secondary" if mode == "redux" else "primary")
-            ]
-
-            return ctrl_updates + button_updates
-                    
+                               
             
         def safe_load_image(img):
             try:
@@ -1337,12 +1912,31 @@ def on_ui_tabs():
             except Exception as e:
                 print(f"Error loading image: {e}")
                 return None
-
         
+        
+        def send_to_canvas(image, current_mode):
+            if current_mode == "fill":
+                return image, None  # background, foreground
+            return None, None
+        
+        transfer_mask_btn.click(
+            fn=lambda bg, fg, up, down, left, right, range, blur: flux_tab.fill_canvas_to_mask(bg, fg, up, down, left, right, range, blur),
+            inputs=[fill_canvas.background, fill_canvas.foreground, expand_up, expand_down, expand_left, expand_right, expand_range, mask_blur],
+            outputs=[mask_image, reference_image, width, height]
+        )
+
+      
         input_image.upload(
             fn=safe_load_image,
             inputs=[input_image],
             outputs=[input_image],
+            queue=False
+        )
+        
+        mask_image.upload(
+            fn=flux_tab.prepare_mask_image,
+            inputs=[mask_image],
+            outputs=[reference_image],
             queue=False
         )
         
@@ -1354,8 +1948,14 @@ def on_ui_tabs():
         )
         
         
+        def conditional_preprocess(img, lt, ht, dr, ir, dbg, pid, current_mode):
+            # Solo procesar automáticamente para modos que no sean "depth"
+            if img is not None and current_mode != "depth":
+                return flux_tab.preprocess_image(img, lt, ht, dr, ir, dbg, pid)
+            return None
+
         input_image.change(
-            fn=flux_tab.preprocess_image,
+            fn=conditional_preprocess,
             inputs=[
                 input_image, 
                 low_threshold, 
@@ -1364,8 +1964,7 @@ def on_ui_tabs():
                 image_resolution, 
                 debug, 
                 processor_id,
-                width,
-                height
+                current_mode  # Añadir el modo actual como entrada
             ],
             outputs=[reference_image],
             queue=False
@@ -1373,31 +1972,55 @@ def on_ui_tabs():
         
         low_threshold.release(
             fn=flux_tab.preprocess_image,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height],
             outputs=[reference_image]
         )
         high_threshold.release(
             fn=flux_tab.preprocess_image,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height],
             outputs=[reference_image]
         )
         image_resolution.release(
             fn=flux_tab.preprocess_image,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height],
             outputs=[reference_image]
         )
         detect_resolution.release(
             fn=flux_tab.preprocess_image,
-            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+            inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height],
             outputs=[reference_image]
         )
         
-        #use_default.click(fn=lambda: load_image("./extensions/sd-forge-fluxcontrolnet/assets/default.png"), outputs=[input_image])
-        get_dimensions_btn.click(
-            fn=update_dimensions,
-            inputs=[input_image, width, height],
-            outputs=[width, height]
+        def check_current_token():
+            result = check_existing_token()
+            if result:
+                return f"✅ Token verification: {result}", result
+            else:
+                return "❌ No valid token found or token could not be verified", ""
+
+       
+        check_token_btn.click(
+            fn=check_current_token,
+            inputs=[],
+            outputs=[log_box, hf_token_status]
         )
+
+        
+        def auto_transfer_then_pre_generate(current_mode, bg, fg, up, down, left, right, range, blur):
+            # Actualizar el botón primero
+            btn_update = gr.Button.update(value="Generating...", variant="secondary", interactive=False)
+            
+            # Solo ejecutar transfer si estamos en modo fill
+            if current_mode == "fill":
+                # Ejecutar la transferencia
+                mask, ref_img, new_width, new_height = flux_tab.fill_canvas_to_mask(bg, fg, up, down, left, right, range, blur)
+                # Devolver los resultados de la transferencia y el botón actualizado
+                return mask, ref_img, new_width, new_height, btn_update
+            else:
+                # Si NO estamos en modo fill, devolver gr.update() para mantener los valores actuales
+                return gr.update(), gr.update(), gr.update(), gr.update(), btn_update
+        
+        
         preprocess_btn.click(
             fn=lambda: gr.update(interactive=False),
             outputs=[preprocess_btn]
@@ -1410,7 +2033,9 @@ def on_ui_tabs():
                 detect_resolution, 
                 image_resolution, 
                 debug, 
-                processor_id
+                processor_id,
+                width,
+                height
             ],
             outputs=[reference_image]
         ).then(
@@ -1425,20 +2050,20 @@ def on_ui_tabs():
         )
         use_hyper_flux.change(
         
-            fn=lambda x: gr.update(value=8 if x else 30),
+            fn=lambda x: gr.update(value=10 if x else 30),
             inputs=[use_hyper_flux],
             outputs=[steps]
         )
         
-        def update_preprocessing(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id):
+        def update_preprocessing(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height):
             if input_image is not None:
-                return flux_tab.preprocess_image(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id)
+                return flux_tab.preprocess_image(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height)
             return None
-            
+                    
         for slider in [low_threshold, high_threshold, detect_resolution, image_resolution]:
             slider.release(
                 fn=update_preprocessing,
-                inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id],
+                inputs=[input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height],
                 outputs=[reference_image]
             )
         def pre_generate():
@@ -1447,13 +2072,21 @@ def on_ui_tabs():
             return result, gr.Button.update(value="Generate", variant="primary", interactive=True)
         
         def generate_with_state(
-            prompt, prompt2, input_image, width, height, steps, guidance,
-            low_threshold, high_threshold, detect_resolution, image_resolution,
+            current_mode, prompt, prompt2, input_image, fill_canvas_background, width, height, 
+            steps, guidance, low_threshold, high_threshold, detect_resolution, image_resolution,
             reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
             prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
             pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch,
-            lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale
+            lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale,
+            mask_image, fill_mode="Inpaint"
         ):
+            # Usar la imagen correcta según el modo
+            if current_mode == "fill":
+                # En modo "fill", pasamos None ya que usaremos reference_image directamente en generate()
+                actual_input_image = None
+            else:
+                actual_input_image = input_image
+            
             try:
                 results = []
                 total_batch = int(batch) if batch is not None else 1
@@ -1477,6 +2110,12 @@ def on_ui_tabs():
                     
                     # Keep track of the last used seed
                     last_used_seed = current_seed
+                                        
+                    if i > 0:
+                        # Limpieza suave de memoria para evitar OOM
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        gc.collect()
                     
                     status_msg = f"Generating image {i+1} of {total_batch} with seed: {current_seed}"
                     yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=current_seed)
@@ -1485,7 +2124,7 @@ def on_ui_tabs():
                     result = flux_tab.generate(
                         prompt=prompt,
                         prompt2=prompt2,
-                        input_image=input_image,
+                        input_image=actual_input_image,  # Usamos la imagen según el modo actual
                         width=width,
                         height=height,
                         steps=steps,
@@ -1497,8 +2136,8 @@ def on_ui_tabs():
                         reference_image=reference_image,
                         debug=debug,
                         processor_id=processor_id,
-                        seed=current_seed,  # We use the calculated seed for this image
-                        randomize_seed=False,  # We pass False because we already handle randomization here
+                        seed=current_seed,
+                        randomize_seed=False,
                         reference_scale=reference_scale,
                         prompt_embeds_scale_1=prompt_embeds_scale_1,
                         prompt_embeds_scale_2=prompt_embeds_scale_2,
@@ -1517,7 +2156,9 @@ def on_ui_tabs():
                         lora2_model=lora2_model,
                         lora2_scale=lora2_scale,
                         lora3_model=lora3_model,
-                        lora3_scale=lora3_scale
+                        lora3_scale=lora3_scale,
+                        mask_image=mask_image,
+                        fill_mode=fill_mode
                     )
                     
                     if result is not None:
@@ -1526,7 +2167,6 @@ def on_ui_tabs():
                         yield results, flux_tab.logger.log(status_msg), status_msg, gr.update(value=current_seed)
                 
                 # Always update the UI with the last seed we actually used
-                # This ensures the seed field shows the most recent seed value
                 final_msg = "Generation completed successfully!"
                 yield results, flux_tab.logger.log(final_msg), final_msg, gr.update(value=last_used_seed)
                 
@@ -1542,9 +2182,9 @@ def on_ui_tabs():
         toggle_reference_btn.click(
             fn=flux_tab.toggle_reference_visibility,
             inputs=[reference_visible, gr.State(flux_tab.current_processor)],
-            outputs=[reference_visible, reference_image, control_image2, toggle_reference_btn, prompt2]
+            outputs=[reference_visible, reference_image, control_image2, toggle_reference_btn, prompt2, mask_image]
         )
-
+        
         # Función para actualizar la lista de LoRAs
         def refresh_all_loras():
             choices = list_lora_files(flux_tab.lora_dir)
@@ -1554,27 +2194,38 @@ def on_ui_tabs():
                 gr.Dropdown.update(choices=choices)
             ]
 
-        refresh_all_loras_btn.click(
-            fn=refresh_all_loras,
-            inputs=[],
-            outputs=[lora1_model, lora2_model, lora3_model]
-        )
-
         generate_btn.click(
-            fn=pre_generate,
-            inputs=None,
-            outputs=[generate_btn],
+            fn=auto_transfer_then_pre_generate,
+            inputs=[
+                current_mode,
+                fill_canvas.background,
+                fill_canvas.foreground,
+                expand_up,
+                expand_down,
+                expand_left,
+                expand_right,
+                expand_range,
+                mask_blur  # Añadir el slider de blur
+            ],
+            outputs=[
+                mask_image,
+                reference_image,
+                width,
+                height,
+                generate_btn
+            ]
         ).then(
             fn=generate_with_state,
             inputs=[
-                prompt, prompt2, input_image, width, height, steps, guidance,
-                low_threshold, high_threshold, detect_resolution, image_resolution,
+                current_mode, prompt, prompt2, input_image, fill_canvas.background, width, height, 
+                steps, guidance, low_threshold, high_threshold, detect_resolution, image_resolution,
                 reference_image, debug, processor_id, seed, randomize_seed, reference_scale,
                 prompt_embeds_scale_1, prompt_embeds_scale_2, pooled_prompt_embeds_scale_1,
                 pooled_prompt_embeds_scale_2, use_hyper_flux, control_image2, batch,
-                lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale
+                lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale,
+                mask_image
             ],
-            outputs=[output_gallery, log_box, progress_bar, seed],  # Agregamos seed a los outputs
+            outputs=[output_gallery, log_box, progress_bar, seed],
             show_progress=True
         ).then(
             fn=post_generate,
@@ -1590,79 +2241,143 @@ def on_ui_tabs():
         )
         
         send_to_control_btn.click(
-            #fn=lambda generated: generated,
-            #inputs=[output_gallery],
-            #outputs=[input_image]
-        #    output_gallery.select(
-        #    fn=lambda evt: evt,
-        #    inputs=[output_gallery],
-        #    outputs=[input_image]
             fn=lambda img: img,
             inputs=[selected_image],
             outputs=[input_image]
-        
         )
             
+
+        # Botón Canny
         canny_btn.click(
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis: on_processor_change(
-                "canny", use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis
-            ),
-            inputs=[
-                use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id, reference_visible
-            ],
+            fn=lambda use_flux: flux_tab.switch_mode("canny", use_flux),
+            inputs=[use_hyper_flux],
             outputs=[
-                low_threshold, high_threshold, detect_resolution, image_resolution,
-                processor_id, reference_scale,
-                prompt_embeds_scale_1, prompt_embeds_scale_2,
-                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
-                steps, guidance,
-                reference_image, control_image2, prompt2,
-                toggle_reference_btn,  # Añadido toggle_reference_btn
-                canny_btn, depth_btn, redux_btn
+                canny_btn,
+                depth_btn,
+                redux_btn,
+                fill_btn,
+                input_image,
+                fill_canvas_group,
+                current_mode,
+                low_threshold,
+                high_threshold,
+                detect_resolution,
+                image_resolution,
+                processor_id,
+                reference_scale,
+                prompt_embeds_scale_1,
+                prompt_embeds_scale_2,
+                pooled_prompt_embeds_scale_1,
+                pooled_prompt_embeds_scale_2,
+                steps,
+                guidance,
+                control_image2,
+                prompt2,
+                mask_image,
+                fill_controls,
+                transfer_mask_btn,
+                reference_image  
             ]
         )
 
+        # Botón Depth
         depth_btn.click(
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis: on_processor_change(
-                "depth", use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis
-            ),
-            inputs=[
-                use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id, reference_visible
-            ],
+            fn=lambda use_flux: flux_tab.switch_mode("depth", use_flux),
+            inputs=[use_hyper_flux],
             outputs=[
-                low_threshold, high_threshold, detect_resolution, image_resolution,
-                processor_id, reference_scale,
-                prompt_embeds_scale_1, prompt_embeds_scale_2,
-                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
-                steps, guidance,
-                reference_image, control_image2, prompt2,
-                toggle_reference_btn,  # Añadido toggle_reference_btn
-                canny_btn, depth_btn, redux_btn
+                canny_btn,
+                depth_btn,
+                redux_btn,
+                fill_btn,
+                input_image,
+                fill_canvas_group,
+                current_mode,
+                low_threshold,
+                high_threshold,
+                detect_resolution,
+                image_resolution,
+                processor_id,
+                reference_scale,
+                prompt_embeds_scale_1,
+                prompt_embeds_scale_2,
+                pooled_prompt_embeds_scale_1,
+                pooled_prompt_embeds_scale_2,
+                steps,
+                guidance,
+                control_image2,
+                prompt2,
+                mask_image,
+                fill_controls,
+                transfer_mask_btn,
+                reference_image  
             ]
         )
 
+        # Botón Redux
         redux_btn.click(
-            fn=lambda use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis: on_processor_change(
-                "redux", use_hyper, img, lt, ht, dr, ir, debug, pid, ref_vis
-            ),
-            inputs=[
-                use_hyper_flux, input_image, low_threshold, high_threshold,
-                detect_resolution, image_resolution, debug, processor_id, reference_visible
-            ],
+            fn=lambda use_flux: flux_tab.switch_mode("redux", use_flux),
+            inputs=[use_hyper_flux],
             outputs=[
-                low_threshold, high_threshold, detect_resolution, image_resolution,
-                processor_id, reference_scale,
-                prompt_embeds_scale_1, prompt_embeds_scale_2,
-                pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2,
-                steps, guidance,
-                reference_image, control_image2, prompt2,  # Asegurarnos que prompt2 está incluido
-                toggle_reference_btn,
-                canny_btn, depth_btn, redux_btn
+                canny_btn,
+                depth_btn,
+                redux_btn,
+                fill_btn,
+                input_image,
+                fill_canvas_group,
+                current_mode,
+                low_threshold,
+                high_threshold,
+                detect_resolution,
+                image_resolution,
+                processor_id,
+                reference_scale,
+                prompt_embeds_scale_1,
+                prompt_embeds_scale_2,
+                pooled_prompt_embeds_scale_1,
+                pooled_prompt_embeds_scale_2,
+                steps,
+                guidance,
+                control_image2,
+                prompt2,
+                mask_image,
+                fill_controls,
+                transfer_mask_btn,
+                reference_image  
             ]
         )
 
+        # Botón Fill
+        fill_btn.click(
+            fn=lambda use_flux: flux_tab.switch_mode("fill", use_flux),
+            inputs=[use_hyper_flux],
+            outputs=[
+                canny_btn,
+                depth_btn,
+                redux_btn,
+                fill_btn,
+                input_image,
+                fill_canvas_group,
+                current_mode,
+                low_threshold,
+                high_threshold,
+                detect_resolution,
+                image_resolution,
+                processor_id,
+                reference_scale,
+                prompt_embeds_scale_1,
+                prompt_embeds_scale_2,
+                pooled_prompt_embeds_scale_1,
+                pooled_prompt_embeds_scale_2,
+                steps,
+                guidance,
+                control_image2,
+                prompt2,
+                mask_image,
+                fill_controls,
+                transfer_mask_btn,
+                reference_image  
+            ]
+        )
 
     return [(flux_interface, "Flux.1 Tools", "flux_controlnet_tab")]
 
