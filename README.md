@@ -1,5 +1,5 @@
 # Flux.1 Tools ControlNet Extension (sd-forge-fluxcontrolnet)
-This is an implementation to use Canny, Depth, and Redux Flux1.dev ControlNet Forge WebUI Extension by [@AcademiaSD](https://github.com/AcademiaSD?tab=repositories)
+This is an implementation to use Canny, Depth, Redux and Fill Flux1.dev ControlNet Forge WebUI Extension by [@AcademiaSD](https://github.com/AcademiaSD?tab=repositories)
 
 ## For Forge WebUI and ComfyUI tutorials
 You can follow and see Spanish videos tutorials (English IA Dub and English Subtitles) on https://www.youtube.com/@Academia_SD
@@ -45,7 +45,7 @@ Go to the Extensions tab > Install from URL > URL for this repository.
 > - For Depth
 >   (https://huggingface.co/Academia-SD/flux1-Depth-Dev-FP8/tree/main)
 >
-> - For Fill (coming soon)
+> - For Fill
 >   (https://huggingface.co/Academia-SD/flux1-Fill-Dev-FP8/tree/main)
 >
 > - Text encoders FP8 
