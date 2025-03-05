@@ -262,7 +262,7 @@ def load_settings():
             "checkpoint_path": "./models/Stable-diffusion/",
             "output_dir": "./outputs/fluxcontrolnet/",
             "lora_dir": "./models/lora/",  # Valor por defecto para loras
-            "text_encoders_path": "./models/Stable-diffusion/text_encoders_FP8"  # Default for text encoders
+            "text_encoders_path": "./models/diffusers/text_encoders_FP8"  # Default for text encoders
         }
         
         if os.path.exists(config_path):
@@ -318,7 +318,7 @@ class FluxControlNetTab:
         self.pipe = None
         #self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4
         self.model_path = "./models/diffusers/text_encoders_FP8"  # Default path
-        self.text_encoders_path = "./models/Stable-diffusion/text_encoders_FP8"  # New default path
+        self.text_encoders_path = "./models/diffusers/text_encoders_FP8"  # New default path
         
 
         self.current_processor = "canny"
@@ -351,12 +351,12 @@ class FluxControlNetTab:
             self.checkpoint_path = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             self.output_dir = settings.get("output_dir", "./outputs/fluxcontrolnet/")
             self.lora_dir = settings.get("lora_dir", "./models/lora/")  # Cargar la ruta de loras
-            self.text_encoders_path = settings.get("text_encoders_path", "./models/Stable-diffusion/text_encoders_FP8")  # Load from settings
+            self.text_encoders_path = settings.get("text_encoders_path", "./models/diffusers/text_encoders_FP8")  # Load from settings
         else:
             self.checkpoint_path = "./models/Stable-diffusion/"
             self.output_dir = "./outputs/fluxcontrolnet/"
             self.lora_dir = "./models/lora/"
-            self.text_encoders_path = "./models/Stable-diffusion/text_encoders_FP8"  # Default path
+            self.text_encoders_path = "./models/diffusers/text_encoders_FP8"  # Default path
             
     def expand_canvas(self, background_image, expand_up=False, expand_down=False, expand_left=False, expand_right=False, expand_range="128"):
         """
@@ -1425,12 +1425,12 @@ def on_ui_tabs():
         initial_checkpoints = settings["checkpoint_path"]
         initial_output = settings["output_dir"]
         initial_lora = settings["lora_dir"]
-        initial_text_encoders = settings.get("text_encoders_path", "./models/Stable-diffusion/text_encoders_FP8")
+        initial_text_encoders = settings.get("text_encoders_path", "./models/diffusers/text_encoders_FP8")
     else:
         initial_checkpoints = "./models/stable-diffusion/"
         initial_output = "./outputs/fluxcontrolnet/"
         initial_lora = "./models/lora/"
-        initial_text_encoders = "./models/Stable-diffusion/text_encoders_FP8"
+        initial_text_encoders = "./models/diffusers/text_encoders_FP8"
     
     css = """
         /* Reducir el ancho de los checkboxes y etiquetas */
@@ -1790,7 +1790,7 @@ def on_ui_tabs():
             checkpoint_value = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             output_value = settings.get("output_dir", "./outputs/fluxcontrolnet/")
             lora_value = settings.get("lora_dir", "./models/lora/")
-            text_encoders_value = settings.get("text_encoders_path", "./models/Stable-diffusion/text_encoders_FP8")
+            text_encoders_value = settings.get("text_encoders_path", "./models/diffusers/text_encoders_FP8")
             
             with gr.Row():
                 ckpt_display = gr.Markdown(f"Current checkpoints path: `{checkpoint_value}`")
