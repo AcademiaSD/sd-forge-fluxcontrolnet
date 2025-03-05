@@ -9,7 +9,8 @@ You can follow and see Spanish videos tutorials (English IA Dub and English Subt
 ## Install
 Go to the Extensions tab > Install from URL > URL for this repository.
 
-## Troubleshooting Video Guide https://youtu.be/iNG5CpOiwXo?si=r23QVgHy0GZHUe9j&t=305
+## Troubleshooting Video Guide 
+https://youtu.be/iNG5CpOiwXo?si=r23QVgHy0GZHUe9j&t=305
 
 ## Supports
 ✅ CUDA GPUs (tested with GPUs of 12GB VRAM, should work with 8GB VRAM) and probably Mac support (bitsandbytes requiered).
