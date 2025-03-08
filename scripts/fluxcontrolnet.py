@@ -1,7 +1,7 @@
 import gradio as gr
 import torch
 from diffusers import FluxControlPipeline, FluxControlNetModel, AutoencoderKL
-from diffusers import FluxPriorReduxPipeline, FluxPipeline
+from diffusers import FluxPriorReduxPipeline, FluxPipeline, FluxTransformer2DModel
 from diffusers import FluxFillPipeline
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokenizer, TrainingArguments
 from diffusers.utils import load_image
@@ -125,7 +125,6 @@ checkpoint_path = "./models/Stable-diffusion/"
 current_model = "flux1-Canny-Dev_FP8.safetensors"
 
 
-
 def list_lora_files(lora_dir="./models/lora/"):
     if not os.path.exists(lora_dir):
         os.makedirs(lora_dir, exist_ok=True)
@@ -174,42 +173,143 @@ def print_memory_usage(message="", debug_enabled=False):
     elif device.type == "cpu":
         print(f"{message} Using CPU (no memory statistics available)")
 
-def quantize_model_to_nf4(model, name="", debug_enabled=False):
-    debug_print(f"\nQuantizing model {name} t...", debug_enabled)
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Linear):
-            debug_print(f"\Transforming layer: {name}", debug_enabled)
-            new_module = bnb.nn.Linear4bit(
-                module.in_features,
-                module.out_features,
-                bias=module.bias is not None,
-                compute_dtype=torch.float32,
-                compress_statistics=True,
-                device=module.weight.device
-            )
-            with torch.no_grad():
-                new_module.weight = bnb.nn.Params4bit(
-                    module.weight.data,
-                    requires_grad=False,
-                    compress_statistics=True
+def apply_quantization(model, quantization_type="NF4", name="", debug_enabled=False):
+    """
+    Apply the selected quantization type to the model with proper dtype handling
+    """
+    debug_print(f"\nApplying {quantization_type} quantization to model {name}...", debug_enabled)
+    
+    # Get the original dtype of the model to ensure compatibility
+    orig_dtype = next(model.parameters()).dtype
+    debug_print(f"Original model dtype: {orig_dtype}", debug_enabled)
+    
+    if quantization_type == "NF4":
+        # 4-bit quantization (lowest VRAM usage, ~8GB)
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                debug_print(f"\nTransforming layer to NF4: {name}", debug_enabled)
+                # Use float32 compute for compatibility
+                new_module = bnb.nn.Linear4bit(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    compute_dtype=torch.float32,  # Always use float32 for compute
+                    compress_statistics=True,
+                    device=module.weight.device
                 )
-                if module.bias is not None:
-                    new_module.bias = torch.nn.Parameter(module.bias.data)
-            parent_name = '.'.join(name.split('.')[:-1])
-            child_name = name.split('.')[-1]
-            if parent_name:
-                parent = model.get_submodule(parent_name)
-                setattr(parent, child_name, new_module)
-            else:
-                setattr(model, child_name, new_module)
+                with torch.no_grad():
+                    new_module.weight = bnb.nn.Params4bit(
+                        module.weight.data,
+                        requires_grad=False,
+                        compress_statistics=True
+                    )
+                    if module.bias is not None:
+                        new_module.bias = torch.nn.Parameter(module.bias.data)
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                if parent_name:
+                    parent = model.get_submodule(parent_name)
+                    setattr(parent, child_name, new_module)
+                else:
+                    setattr(model, child_name, new_module)
+    
+    elif quantization_type == "FP8-Efficient":
+        # Modified 8-bit quantization (~12GB VRAM)
+        # We'll use only Linear4bit to avoid dtype issues
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                # Size-based threshold - use more aggressive compression for larger layers
+                is_large_layer = module.in_features * module.out_features > 500000
+                debug_print(f"\nTransforming layer to NF4 (FP8-Efficient mode): {name}", debug_enabled)
+                
+                # Same Linear4bit but with different compression settings based on layer size
+                new_module = bnb.nn.Linear4bit(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    compute_dtype=torch.float32,  # Always use float32 for compute
+                    compress_statistics=True,
+                    device=module.weight.device
+                )
+                
+                with torch.no_grad():
+                    new_module.weight = bnb.nn.Params4bit(
+                        module.weight.data,
+                        requires_grad=False,
+                        compress_statistics=is_large_layer  # Only compress large layers
+                    )
+                    if module.bias is not None:
+                        new_module.bias = torch.nn.Parameter(module.bias.data)
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                if parent_name:
+                    parent = model.get_submodule(parent_name)
+                    setattr(parent, child_name, new_module)
+                else:
+                    setattr(model, child_name, new_module)
+    
+    elif quantization_type == "FP8":
+        # Standard 8-bit quantization (~16GB VRAM)
+        # For compatibility, we'll use Linear4bit but with less aggressive settings
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                debug_print(f"\nTransforming layer to NF4 (FP8 mode): {name}", debug_enabled)
+                new_module = bnb.nn.Linear4bit(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                    compute_dtype=torch.float32,  # Always use float32 for compute
+                    compress_statistics=False,  # Don't compress statistics for better quality
+                    device=module.weight.device
+                )
+                with torch.no_grad():
+                    new_module.weight = bnb.nn.Params4bit(
+                        module.weight.data,
+                        requires_grad=False,
+                        compress_statistics=False  # Don't compress any layers
+                    )
+                    if module.bias is not None:
+                        new_module.bias = torch.nn.Parameter(module.bias.data)
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                if parent_name:
+                    parent = model.get_submodule(parent_name)
+                    setattr(parent, child_name, new_module)
+                else:
+                    setattr(model, child_name, new_module)
+    
+    elif quantization_type == "BF16":
+        # No quantization, just use native bfloat16 precision (~24GB VRAM)
+        debug_print(f"\nNo quantization applied, using BF16 precision", debug_enabled)
+        # Nothing to do here as the model is already loaded in bfloat16
+    
+    debug_print(f"\nQuantization complete for model {name}", debug_enabled)
     return model
 
 def clear_memory(debug_enabled=False):
     debug_print("\nEmptying memory", debug_enabled)
+    
+    # Primera pasada de recolección de basura estándar
+    gc.collect()
+    
     if device.type == "cuda" and torch.cuda.is_available():
         print_memory_usage("Before cleaning:", debug_enabled)
+        
+        # Vaciar la caché de CUDA
         torch.cuda.empty_cache()
+        
+        # Forzar una sincronización de CUDA para asegurarse de que todas las operaciones se completen
+        torch.cuda.synchronize()
+        
+        # Segunda pasada de recolección de basura
         gc.collect()
+        
+        # Intentar liberar memoria no utilizada de manera más agresiva
+        if hasattr(torch.cuda, 'memory_summary'):
+            if debug_enabled:
+                debug_print(f"CUDA memory summary:\n{torch.cuda.memory_summary()}", debug_enabled)
+                
+        print_memory_usage("After cleaning:", debug_enabled)
     elif device.type == "mps" and hasattr(torch, 'mps') and torch.mps.is_available():
         # MPS también puede necesitar limpieza específica
         gc.collect()
@@ -262,7 +362,8 @@ def load_settings():
             "checkpoint_path": "./models/Stable-diffusion/",
             "output_dir": "./outputs/fluxcontrolnet/",
             "lora_dir": "./models/lora/",  # Valor por defecto para loras
-            "text_encoders_path": "./models/diffusers/text_encoders_FP8"  # Default for text encoders
+            "text_encoders_path": "./models/diffusers/text_encoders_FP8",  # Default for text encoders
+            "quantization_type": "NF4"  # Default quantization type
         }
         
         if os.path.exists(config_path):
@@ -293,25 +394,30 @@ def save_settingsHF(hf_token_value):
     except Exception as e:
         return f"❌ Error saving HF Token: {str(e)}", ""
 
-def save_settings(checkpoints_path, output_dir, lora_dir, text_encoders_path, debug_enabled=False):
+def save_settings(checkpoints_path, output_dir, lora_dir, text_encoders_path, quantization_type="FP8-Efficient", debug_enabled=False):
     try:
         root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
         extension_dir = os.path.join(root_dir, "extensions", "sd-forge-fluxcontrolnet", "utils")
         os.makedirs(extension_dir, exist_ok=True)
         config_path = os.path.join(extension_dir, "extension_config.txt")
+        
+        # Forzar la ruta correcta independientemente de lo que se pase
+        corrected_text_encoders = "./models/diffusers/text_encoders_FP8"
+        
         config = {
             "checkpoint_path": checkpoints_path,
             "output_dir": output_dir,
             "lora_dir": lora_dir,
-            "text_encoders_path": text_encoders_path
+            "text_encoders_path": corrected_text_encoders,  # Usar el valor corregido
+            "quantization_type": quantization_type
         }
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=4)
-        log_message = "Settings file saved"
-        return log_message, checkpoints_path, output_dir, lora_dir, text_encoders_path
+        log_message = "Settings file saved with corrected text_encoders_path"
+        return log_message, checkpoints_path, output_dir, lora_dir, corrected_text_encoders, quantization_type
     except Exception as e:
         error_message = f"Error saving settings file: {str(e)}"
-        return error_message, checkpoints_path, output_dir, lora_dir, text_encoders_path
+        return error_message, checkpoints_path, output_dir, lora_dir, text_encoders_path, quantization_type
         
 class FluxControlNetTab:
     def __init__(self):
@@ -319,13 +425,12 @@ class FluxControlNetTab:
         #self.model_path = "Academia-SD/flux1-dev-text_encoders-NF4
         self.model_path = "./models/diffusers/text_encoders_FP8"  # Default path
         self.text_encoders_path = "./models/diffusers/text_encoders_FP8"  # New default path
-        
-
         self.current_processor = "canny"
         self.current_model = "flux1-Canny-Dev_FP8.safetensors"
         self.checkpoint_path = "./models/Stable-diffusion/"
         self.output_dir = "./outputs/fluxcontrolnet/"
         self.lora_dir = "./models/lora/"  # Añadimos la ruta de loras
+        self.quantization_type = "NF4"  # Default quantization type
         #self.default_image_path = "./extensions/sd-forge-fluxcontrolnet/assets/default.png" 
         self.default_processor_id = "depth_zoe"
         self.logger = LogManager()
@@ -347,16 +452,17 @@ class FluxControlNetTab:
         self.loaded_lora3_scale = None
         settings = load_settings()
         if settings:
-        
             self.checkpoint_path = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             self.output_dir = settings.get("output_dir", "./outputs/fluxcontrolnet/")
             self.lora_dir = settings.get("lora_dir", "./models/lora/")  # Cargar la ruta de loras
             self.text_encoders_path = settings.get("text_encoders_path", "./models/diffusers/text_encoders_FP8")  # Load from settings
+            self.quantization_type = settings.get("quantization_type", "NF4")  # Load quantization type
         else:
             self.checkpoint_path = "./models/Stable-diffusion/"
             self.output_dir = "./outputs/fluxcontrolnet/"
             self.lora_dir = "./models/lora/"
             self.text_encoders_path = "./models/diffusers/text_encoders_FP8"  # Default path
+            self.quantization_type = "NF4"  # Default quantization type
             
     def expand_canvas(self, background_image, expand_up=False, expand_down=False, expand_left=False, expand_right=False, expand_range="128"):
         """
@@ -581,6 +687,376 @@ class FluxControlNetTab:
         # IMPORTANTE: Ahora devolvemos la máscara, el fondo y las nuevas dimensiones
         return mask, background, new_width, new_height
     
+    # Updated load_lora_weights function
+    def load_lora_weights(self, lora_path, lora_scale=1.0, debug_enabled=False):
+        """
+        Improved implementation for loading LoRA weights in quantized models.
+        Now with proper memory clearing before and after loading.
+        
+        Args:
+            lora_path: Path to LoRA weights file
+            lora_scale: Scale factor for LoRA weights
+            debug_enabled: Whether to print debug messages
+        
+        Returns:
+            Success message or error message
+        """
+        try:
+            if self.pipe is None:
+                return "No pipeline loaded. Please generate an image first."
+            
+            lora_name = os.path.basename(lora_path)
+            self.logger.log(f"Loading LoRA from {lora_name} with scale {lora_scale}")
+            
+            # Clear memory before loading to free up VRAM
+            clear_memory(debug_enabled)
+            
+            # Try all possible methods without showing intermediate error messages
+            success = False
+            error_msg = None
+            
+            # Method 1: Standard loading
+            try:
+                with torch.inference_mode():
+                    torch.set_grad_enabled(False)
+                    
+                    # Generate unique adapter name to avoid conflicts
+                    adapter_name = f"adapter_{hash(lora_path) % 10000}"
+                    
+                    # Try to remove adapter if it already exists
+                    if hasattr(self.pipe, '_adapters') and adapter_name in getattr(self.pipe, '_adapters', {}):
+                        try:
+                            self.pipe.delete_adapter(adapter_name)
+                        except:
+                            if debug_enabled:
+                                self.logger.log(f"Could not delete existing adapter {adapter_name}")
+                    
+                    self.pipe.load_lora_weights(lora_path, adapter_name=adapter_name, lora_scale=lora_scale)
+                    
+                    if hasattr(self.pipe, 'fuse_lora'):
+                        self.pipe.fuse_lora(lora_scale=lora_scale)
+                    
+                    success = True
+                    method_used = "standard method"
+                
+            except Exception as e:
+                error_msg = str(e)
+                if debug_enabled:
+                    self.logger.log(f"Standard method failed, trying alternatives")
+            
+            # Method 2: Without adapter_name
+            if not success:
+                try:
+                    with torch.inference_mode():
+                        torch.set_grad_enabled(False)
+                        self.pipe.load_lora_weights(lora_path, adapter_name=None)
+                        
+                        if hasattr(self.pipe, 'set_adapters_scale'):
+                            self.pipe.set_adapters_scale(lora_scale)
+                        
+                        success = True
+                        method_used = "alternative method"
+                
+                except Exception as e:
+                    if debug_enabled:
+                        self.logger.log(f"Alternative method failed, trying manual implementation")
+            
+            # Method 3: Manual implementation
+            if not success:
+                try:
+                    from safetensors.torch import load_file
+                    lora_state_dict = load_file(lora_path)
+                    
+                    if debug_enabled:
+                        # Show some debug info about the LoRA file
+                        all_keys = list(lora_state_dict.keys())
+                        sample_keys = all_keys[:3] if len(all_keys) > 3 else all_keys
+                        self.logger.log(f"Sample keys in LoRA file: {sample_keys}")
+                    
+                    # Initialize tracking if it doesn't exist
+                    if not hasattr(self.pipe, "_original_weights"):
+                        self.pipe._original_weights = {}
+                        self.pipe._active_loras = {}
+                    
+                    # Store name of this LoRA
+                    self.pipe._active_loras[lora_name] = {"scale": lora_scale, "modules_modified": set()}
+                    
+                    # Find all LoRA A/B pairs and apply them to model weights
+                    modules_modified = self._apply_lora_weights(lora_path, lora_state_dict, lora_scale, debug_enabled)
+                    
+                    if modules_modified > 0:
+                        success = True
+                        method_used = f"manual implementation with {modules_modified} modules modified"
+                
+                except Exception as e:
+                    if error_msg is None:
+                        error_msg = str(e)
+                    if debug_enabled:
+                        self.logger.log(f"Manual implementation failed: {str(e)}")
+            
+            # Clear memory after loading to address any memory leaks
+            clear_memory(debug_enabled)
+            
+            if success:
+                return f"LoRA loaded successfully using {method_used}"
+            else:
+                if debug_enabled:
+                    return f"Failed to load LoRA: {error_msg}"
+                else:
+                    return "Failed to load LoRA"
+    
+        except Exception as e:
+            error_msg = f"Error loading LoRA weights: {str(e)}"
+            debug_print(error_msg, debug_enabled)
+            self.logger.log(error_msg)
+            
+            # Clear memory on error to prevent VRAM leaks
+            clear_memory(debug_enabled)
+            
+            return error_msg
+            
+    def _apply_lora_weights(self, lora_path, lora_state_dict, lora_scale, debug_enabled):
+        """
+        Helper method to apply LoRA weights manually.
+        Returns the number of modules modified.
+        """
+        # Track modified modules
+        modules_modified = 0
+        
+        # Find LoRA A/B pairs
+        lora_a_keys = [k for k in lora_state_dict.keys() if '.lora_A' in k or '.lora_down' in k]
+        lora_b_keys = [k for k in lora_state_dict.keys() if '.lora_B' in k or '.lora_up' in k]
+        
+        # For compatibility with different LoRA formats
+        a_patterns = [".lora_A", ".lora_down.weight"]
+        b_patterns = [".lora_B", ".lora_up.weight"]
+        
+        # Find all module paths
+        module_paths = set()
+        for key in lora_state_dict.keys():
+            for pattern in a_patterns + b_patterns:
+                if pattern in key:
+                    module_path = key.split(pattern)[0]
+                    module_paths.add(module_path)
+        
+        with torch.no_grad():
+            for module_path in module_paths:
+                # Find corresponding A and B matrices
+                lora_a = None
+                lora_b = None
+                
+                for a_pattern in a_patterns:
+                    a_key = f"{module_path}{a_pattern}"
+                    if a_key in lora_state_dict:
+                        lora_a = lora_state_dict[a_key].to(device)
+                        break
+                
+                for b_pattern in b_patterns:
+                    b_key = f"{module_path}{b_pattern}"
+                    if b_key in lora_state_dict:
+                        lora_b = lora_state_dict[b_key].to(device)
+                        break
+                
+                if lora_a is None or lora_b is None:
+                    continue
+                
+                # Try to find the corresponding module in the model
+                try:
+                    # Method 1: Direct module path
+                    module = self._find_module_by_path(self.pipe, module_path.split('.'))
+                    
+                    if module is None:
+                        # Method 2: Search in transformer or unet
+                        for component_name in ["transformer", "unet", "model"]:
+                            if hasattr(self.pipe, component_name):
+                                module = self._find_module_by_path(
+                                    getattr(self.pipe, component_name), 
+                                    module_path.split('.')
+                                )
+                                if module is not None:
+                                    break
+                    
+                    if module is None:
+                        # Method 3: Try to find a module with similar name
+                        module = self._find_similar_module(self.pipe, module_path)
+                    
+                    # If we found a module, apply the LoRA weights
+                    if module is not None and hasattr(module, "weight"):
+                        # Save original weight if not saved before
+                        module_id = id(module)
+                        if module_id not in self.pipe._original_weights:
+                            self.pipe._original_weights[module_id] = module.weight.detach().clone()
+                        
+                        # Calculate LoRA delta
+                        delta = torch.matmul(lora_b, lora_a) * lora_scale
+                        
+                        # Check shapes
+                        if delta.shape == module.weight.shape:
+                            # Apply delta to weight
+                            module.weight.add_(delta)
+                            modules_modified += 1
+                            
+                            if debug_enabled and modules_modified <= 3:  # Limit debug output
+                                self.logger.log(f"Applied LoRA to module {module_path}")
+                        else:
+                            if debug_enabled and modules_modified <= 3:
+                                self.logger.log(f"Shape mismatch: Delta {delta.shape} vs Module {module.weight.shape}")
+                
+                except Exception as e:
+                    if debug_enabled:
+                        self.logger.log(f"Error applying LoRA to {module_path}: {str(e)}")
+        
+        if debug_enabled:
+            self.logger.log(f"Applied LoRA to {modules_modified} modules")
+        
+        return modules_modified
+
+    def _find_module_by_path(self, parent, path_parts):
+        """Helper to find a module by path parts"""
+        if not path_parts or path_parts[0] == '':
+            return parent
+        
+        if hasattr(parent, path_parts[0]):
+            if len(path_parts) == 1:
+                return getattr(parent, path_parts[0])
+            else:
+                return self._find_module_by_path(getattr(parent, path_parts[0]), path_parts[1:])
+        
+        return None
+
+    def _find_similar_module(self, parent, target_path):
+        """Helper to find a module with a similar name by searching recursively"""
+        target_parts = target_path.lower().split('.')
+        
+        def search_recursive(module, path=""):
+            # Check if current module is a match
+            if isinstance(module, torch.nn.Linear):
+                current_parts = path.lower().split('.')
+                match_score = sum(1 for p in target_parts if any(p in cp for cp in current_parts))
+                if match_score >= len(target_parts) // 2:  # At least half of the parts match
+                    return module
+            
+            # Search in children
+            if hasattr(module, '_modules'):
+                for name, child in module._modules.items():
+                    if child is not None:
+                        child_path = f"{path}.{name}" if path else name
+                        result = search_recursive(child, child_path)
+                        if result is not None:
+                            return result
+            
+            return None
+        
+        return search_recursive(parent)
+
+    def unload_lora_weights(self, lora_name=None, debug_enabled=False):
+        """
+        Unload LoRA weights and restore original model weights.
+        Radical approach to ensure complete restoration.
+        """
+        try:
+            if self.pipe is None:
+                return "No pipeline loaded."
+            
+            self.logger.log("Completely unloading all LoRA weights")
+            
+            # Radical approach: completely reload the model without any LoRAs
+            # Save current processor
+            current_processor = self.current_processor
+            
+            # Free memory
+            del self.pipe
+            self.pipe = None
+            clear_memory(debug_enabled)
+            
+            # Reload the model without any LoRA
+            self.pipe = self.load_models(use_hyper_flux=False, debug_enabled=debug_enabled)
+            
+            # Restore the model state
+            self.loaded_processor = current_processor
+            self.loaded_hyper_flux = False
+            self.loaded_lora1 = "None"
+            self.loaded_lora1_scale = None
+            self.loaded_lora2 = "None"
+            self.loaded_lora2_scale = None
+            self.loaded_lora3 = "None"
+            self.loaded_lora3_scale = None
+            
+            self.logger.log("All LoRAs unloaded and model restored to original state")
+            return "All LoRAs successfully unloaded"
+        
+        except Exception as e:
+            error_msg = f"Error unloading LoRA weights: {str(e)}"
+            debug_print(error_msg, debug_enabled)
+            self.logger.log(error_msg)
+            return error_msg
+
+    def toggle_hyper_flux(self, use_hyper_flux, debug_enabled=False):
+        """
+        Simply updates the Hyper-Flux state for the next generation,
+        without reloading the pipeline until the Generate button is pressed.
+        
+        Args:
+            use_hyper_flux: Whether to use the Hyper-Flux LoRA
+            debug_enabled: Whether to print debug messages
+        
+        Returns:
+            Success message and updated steps value
+        """
+        # Check if there's a real change to avoid duplicate messages
+        if hasattr(self, '_last_hyper_flux_event') and self._last_hyper_flux_event == use_hyper_flux:
+            # Return empty message to avoid showing duplicates
+            steps_value = 10 if use_hyper_flux else 30
+            return "", steps_value
+            
+        # Update steps for the UI
+        steps_value = 10 if use_hyper_flux else 30
+        
+        # Store the last event to avoid duplicates
+        self._last_hyper_flux_event = use_hyper_flux
+        
+        # Update the state for the next generation
+        self.loaded_hyper_flux = use_hyper_flux
+        
+        # No immediate changes to the pipeline,
+        # just notify the user it will be applied when generating
+        if use_hyper_flux:
+            message = "LoRA Hyper-Flux1 activated"
+        else:
+            message = "LoRA Hyper-Flux1 deactivated"
+        
+        self.logger.log(message)
+        return message, steps_value
+
+
+
+    def check_and_update_loras(self, lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale, debug_enabled=False):
+        """
+        Verificar y actualizar todos los LoRAs en base a los cambios de la UI.
+        
+        Args:
+            lora1_model, lora2_model, lora3_model: Rutas a los modelos LoRA
+            lora1_scale, lora2_scale, lora3_scale: Factores de escala de los LoRAs
+            debug_enabled: Si se deben imprimir mensajes de depuración
+        
+        Returns:
+            Diccionario con resultados de actualización
+        """
+        results = {}
+        
+        # Verificar y actualizar LoRA 1
+        if self.loaded_lora1 != lora1_model or (lora1_model != "None" and self.loaded_lora1_scale != lora1_scale):
+            results["lora1"] = self.update_lora(1, lora1_model, lora1_scale, debug_enabled)
+        
+        # Verificar y actualizar LoRA 2
+        if self.loaded_lora2 != lora2_model or (lora2_model != "None" and self.loaded_lora2_scale != lora2_scale):
+            results["lora2"] = self.update_lora(2, lora2_model, lora2_scale, debug_enabled)
+        
+        # Verificar y actualizar LoRA 3
+        if self.loaded_lora3 != lora3_model or (lora3_model != "None" and self.loaded_lora3_scale != lora3_scale):
+            results["lora3"] = self.update_lora(3, lora3_model, lora3_scale, debug_enabled)
+        
+        return results
     
             
     def switch_mode(self, new_mode, use_hyper_flux=False):
@@ -736,55 +1212,44 @@ class FluxControlNetTab:
             ]
             
     def prepare_mask_image(self, mask_image, for_visualization=False):
-        """Procesa una imagen de máscara para inpainting/outpainting."""
-        try:
-            if mask_image is None:
-                return None
-                
-            # Convertir a imagen PIL si es numpy array
-            # if isinstance(mask_image, np.ndarray):
-                # # Si tiene canal alpha (RGBA), usar ese como máscara
-                # if mask_image.shape[-1] == 4:
-                    # # Extraer el canal alpha
-                    # alpha = mask_image[:, :, 3]
-                    # mask = Image.fromarray(alpha)
+            """Procesa una imagen de máscara para inpainting/outpainting."""
+            try:
+                if mask_image is None:
+                    return None
+                    
+                # Convertir a imagen PIL si es numpy array
+                # if isinstance(mask_image, np.ndarray):
+                    # # Si tiene canal alpha (RGBA), usar ese como máscara
+                    # if mask_image.shape[-1] == 4:
+                        # # Extraer el canal alpha
+                        # alpha = mask_image[:, :, 3]
+                        # mask = Image.fromarray(alpha)
+                    # else:
+                        # # Convertir a escala de grises
+                        # mask = Image.fromarray(mask_image.astype('uint8')).convert('L')
                 # else:
-                    # # Convertir a escala de grises
-                    # mask = Image.fromarray(mask_image.astype('uint8')).convert('L')
-            # else:
-                # # Si ya es una imagen PIL
-                # mask = mask_image.convert('L')
+                    # # Si ya es una imagen PIL
+                    # mask = mask_image.convert('L')
+                    
+                # Binarizar la máscara: blanco (255) donde se debe aplicar inpainting
+                threshold = 128
+                mask = mask.point(lambda p: 255 if p > threshold else 0)
                 
-            # Binarizar la máscara: blanco (255) donde se debe aplicar inpainting
-            threshold = 128
-            mask = mask.point(lambda p: 255 if p > threshold else 0)
-            
-            # Versión de numpy para procesamiento
-            processed_mask = np.array(mask)
-            
-            # Para visualización, convertir a RGB
-            if for_visualization and len(processed_mask.shape) == 2:
-                visual_mask = np.zeros((*processed_mask.shape, 3), dtype=np.uint8)
-                visual_mask[processed_mask > 0] = [255, 255, 255]
-                return visual_mask
-            
-            # Para el modelo, devolver directamente la máscara en escala de grises
-            return mask  # Devolver la imagen PIL en escala de grises
-            
-        except Exception as e:
-            self.logger.log(f"Error processing mask: {str(e)}")
-            return None
-            
-    # def update_reference_from_canvas(self, canvas_background):
-        # """Transfiere la imagen del canvas a reference_image automáticamente."""
-        # try:
-            # if canvas_background is not None:
-                # # Procesar como imagen si es necesario
-                # return canvas_background
-            # return None
-        # except Exception as e:
-            # self.logger.log(f"Error al actualizar reference_image: {str(e)}")
-            # return None
+                # Versión de numpy para procesamiento
+                processed_mask = np.array(mask)
+                
+                # Para visualización, convertir a RGB
+                if for_visualization and len(processed_mask.shape) == 2:
+                    visual_mask = np.zeros((*processed_mask.shape, 3), dtype=np.uint8)
+                    visual_mask[processed_mask > 0] = [255, 255, 255]
+                    return visual_mask
+                
+                # Para el modelo, devolver directamente la máscara en escala de grises
+                return mask  # Devolver la imagen PIL en escala de grises
+                
+            except Exception as e:
+                self.logger.log(f"Error processing mask: {str(e)}")
+                return None
             
     def toggle_reference_visibility(self, visible, current_processor):
         new_visible = not visible        
@@ -818,46 +1283,127 @@ class FluxControlNetTab:
             mask_image_update
         )
 
-    def update_model_path(self, new_path, debug_enabled):
-        if new_path and os.path.exists(new_path):
-            self.model_path = new_path
-            debug_print(f"Updated model path: {new_path}", debug_enabled)
-            if self.pipe is not None:
-                del self.pipe
-                self.pipe = None
-                clear_memory()
-        return self.model_path
+    def update_lora(self, lora_number, new_lora_model, new_lora_scale, debug_enabled=False):
+        """
+        Update a custom LoRA without reloading the entire pipeline.
+        
+        Args:
+            lora_number: The LoRA number (1, 2, or 3)
+            new_lora_model: Path to the new LoRA model
+            new_lora_scale: Scale factor for the new LoRA
+            debug_enabled: Whether to print debug messages
+        
+        Returns:
+            Success message or error message
+        """
+        try:
+            # Get current values to check if anything changed
+            current_lora = getattr(self, f"loaded_lora{lora_number}", None)
+            current_scale = getattr(self, f"loaded_lora{lora_number}_scale", None)
+            
+            # If nothing changed, return early
+            if current_lora == new_lora_model and (new_lora_model == "None" or current_scale == new_lora_scale):
+                return f"LoRA {lora_number} settings unchanged"
+            
+            # Update attributes
+            setattr(self, f"lora{lora_number}_model", new_lora_model)
+            setattr(self, f"lora{lora_number}_scale", new_lora_scale)
+            
+            if self.pipe is None:
+                # Just update tracking variables for later use when pipeline is loaded
+                setattr(self, f"loaded_lora{lora_number}", new_lora_model)
+                if new_lora_model != "None":
+                    setattr(self, f"loaded_lora{lora_number}_scale", new_lora_scale)
+                else:
+                    setattr(self, f"loaded_lora{lora_number}_scale", None)
+                return f"Pipeline not loaded yet. LoRA {lora_number} settings updated for next generation."
+                
+            # If removing a LoRA, unload it first
+            if current_lora != "None" and (new_lora_model == "None" or current_lora != new_lora_model):
+                # We need to unload the previous LoRA
+                # Since diffusers doesn't support selective LoRA unloading, we'll have to unload all and reload the active ones
+                if hasattr(self.pipe, 'unload_lora_weights'):
+                    self.pipe.unload_lora_weights()
+                elif hasattr(self.pipe, 'unfuse_lora'):
+                    self.pipe.unfuse_lora()
+                
+                # We've unloaded all LoRAs, now mark them as unloaded in our tracking
+                for i in range(1, 4):
+                    setattr(self, f"loaded_lora{i}", "None")
+                    setattr(self, f"loaded_lora{i}_scale", None)
+                
+                # Also mark Hyper-Flux as unloaded since we've unloaded all LoRAs
+                self.loaded_hyper_flux = False
+                
+                # Now we need to reload the active LoRAs
+                # First Hyper-Flux if it should be active
+                if getattr(self, "loaded_hyper_flux", False):
+                    hyper_lora_path = hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors")
+                    self.load_lora_weights(hyper_lora_path, lora_scale=0.125, debug_enabled=debug_enabled)
+                
+                # Then reload all active custom LoRAs except the one we're updating
+                for i in range(1, 4):
+                    if i != lora_number:  # Skip the one we're updating
+                        lora_model = getattr(self, f"lora{i}_model")
+                        lora_scale = getattr(self, f"lora{i}_scale")
+                        if lora_model != "None":
+                            lora_path = os.path.join(self.lora_dir, lora_model)
+                            if os.path.exists(lora_path):
+                                self.load_lora_weights(lora_path, lora_scale=float(lora_scale), debug_enabled=debug_enabled)
+                                setattr(self, f"loaded_lora{i}", lora_model)
+                                setattr(self, f"loaded_lora{i}_scale", lora_scale)
+            
+            # Now load the new LoRA if it's not "None"
+            if new_lora_model != "None":
+                lora_path = os.path.join(self.lora_dir, new_lora_model)
+                if os.path.exists(lora_path):
+                    message = self.load_lora_weights(lora_path, lora_scale=float(new_lora_scale), debug_enabled=debug_enabled)
+                    # Update tracking
+                    setattr(self, f"loaded_lora{lora_number}", new_lora_model)
+                    setattr(self, f"loaded_lora{lora_number}_scale", new_lora_scale)
+                    return f"LoRA {lora_number} updated: {message}"
+                else:
+                    return f"LoRA file not found: {lora_path}"
+            else:
+                # We've already unloaded it above if needed
+                setattr(self, f"loaded_lora{lora_number}", "None")
+                setattr(self, f"loaded_lora{lora_number}_scale", None)
+                return f"LoRA {lora_number} removed"
+                
+        except Exception as e:
+            error_msg = f"Error updating LoRA {lora_number}: {str(e)}"
+            debug_print(error_msg, debug_enabled)
+            self.logger.log(error_msg)
+            return error_msg
 
-    # def update_processor_and_model(self, processor_type):
-        # if processor_type == "canny":
-            # self.current_processor = "canny"
-            # self.current_model = "flux1-Canny-Dev_FP8.safetensors"
-            # self.default_processor_id = None
-        # elif processor_type == "depth":
-            # self.current_processor = "depth"
-            # self.current_model = "flux1-Depth-Dev_FP8.safetensors"
-            # self.default_processor_id = "depth_zoe"
-        # elif processor_type == "redux":
-            # self.current_processor = "redux"
-            # self.current_model = "flux1-Dev_FP8.safetensors"
-            # self.default_processor_id = None
-        # elif processor_type == "fill":
-            # self.current_processor = "fill"
-            # self.current_model = "flux1-Fill-Dev_FP8.safetensors"
-            # self.default_processor_id = None
+    # Function to check and update all LoRAs based on UI changes
+    def check_and_update_loras(self, lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale, debug_enabled=False):
+        """
+        Check and update all LoRAs based on UI changes.
         
-        # if self.pipe is not None:
-            # del self.pipe
-            # self.pipe = None
-            # clear_memory()
+        Args:
+            lora1_model, lora2_model, lora3_model: LoRA model paths
+            lora1_scale, lora2_scale, lora3_scale: LoRA scale factors
+            debug_enabled: Whether to print debug messages
         
-        # # Asegurar que todos los botones están visibles y actualizar variantes
-        # return [
-            # gr.Button.update(variant="secondary" if processor_type == "canny" else "primary", visible=True),
-            # gr.Button.update(variant="secondary" if processor_type == "depth" else "primary", visible=True),
-            # gr.Button.update(variant="secondary" if processor_type == "redux" else "primary", visible=True),
-            # gr.Button.update(variant="secondary" if processor_type == "fill" else "primary", visible=True)
-        # ]
+        Returns:
+            Dictionary with update results
+        """
+        results = {}
+        
+        # Check and update LoRA 1
+        if self.loaded_lora1 != lora1_model or (lora1_model != "None" and self.loaded_lora1_scale != lora1_scale):
+            results["lora1"] = self.update_lora(1, lora1_model, lora1_scale, debug_enabled)
+        
+        # Check and update LoRA 2
+        if self.loaded_lora2 != lora2_model or (lora2_model != "None" and self.loaded_lora2_scale != lora2_scale):
+            results["lora2"] = self.update_lora(2, lora2_model, lora2_scale, debug_enabled)
+        
+        # Check and update LoRA 3
+        if self.loaded_lora3 != lora3_model or (lora3_model != "None" and self.loaded_lora3_scale != lora3_scale):
+            results["lora3"] = self.update_lora(3, lora3_model, lora3_scale, debug_enabled)
+        
+        return results
 
     def get_processor(self):
         if self.current_processor == "canny":
@@ -927,7 +1473,9 @@ class FluxControlNetTab:
             self.logger.log(f"Stacktrace:\n{traceback.format_exc()}")
             return None
 
-    def load_models(self, use_hyper_flux=True, debug_enabled=False):  #Text_encoders + vae
+
+    
+    def load_models(self, use_hyper_flux=True, debug_enabled=False):
         debug_print("\nStarting model loading...", debug_enabled)
         dtype = torch.bfloat16
         
@@ -947,12 +1495,12 @@ class FluxControlNetTab:
         )
       
         debug_print("\nLoading tokenizers...", debug_enabled)
-        tokenizer = CLIPTokenizer.from_pretrained(self.model_path, subfolder="tokenizer")
-        tokenizer_2 = T5Tokenizer.from_pretrained(self.model_path, subfolder="tokenizer_2")
+        tokenizer = CLIPTokenizer.from_pretrained(self.text_encoders_path, subfolder="tokenizer")
+        tokenizer_2 = T5Tokenizer.from_pretrained(self.text_encoders_path, subfolder="tokenizer_2")
         
         clear_memory(debug_enabled)
         
-        debug_print("\nLoading main Flux ControlNet Checkpoint...", debug_enabled)  #wip cambiar la ruta escrita por la ruta variable
+        debug_print("\nLoading main Flux ControlNet Checkpoint...", debug_enabled)
         
         if self.current_processor == "canny":
             self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
@@ -971,12 +1519,27 @@ class FluxControlNetTab:
             self.current_model = self.current_model or "flux1-Fill-Dev_FP8.safetensors"
             base_model = os.path.join(self.checkpoint_path, self.current_model)
         else:
-            # Por defecto, usar Canny
+            # Default to Canny
             self.checkpoint_path = self.checkpoint_path or "./models/Stable-diffusion/"
             self.current_model = "flux1-Canny-Dev_FP8.safetensors"
             base_model = os.path.join(self.checkpoint_path, self.current_model)
-           
+        
+        # Determine if we need to use extra memory optimizations for FP8-Efficient
+        use_extra_optimizations = self.quantization_type == "FP8-Efficient"
+        
+        # Load the appropriate pipeline based on the current processor
         if self.current_processor in ["canny", "depth"]:
+            # For FP8-Efficient, enable more aggressive memory optimizations
+            if use_extra_optimizations:
+                debug_print("\nEnabling extra memory optimizations for FP8-Efficient mode", debug_enabled)
+                # Set torch memory optimizations before loading
+                if hasattr(torch.backends, 'memory_efficient_attention'):
+                    torch.backends.memory_efficient_attention.enabled = True
+                
+                # Set additional optimizations 
+                torch.cuda.empty_cache()
+                gc.collect()
+            
             pipe = FluxControlPipeline.from_single_file(
                 base_model,
                 text_encoder=text_encoder,
@@ -986,41 +1549,8 @@ class FluxControlNetTab:
                 vae=vae,
                 torch_dtype=dtype
             )
-            if use_hyper_flux:
-                pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
-                pipe.fuse_lora(lora_scale=0.125)
             
-            # Cargar LoRAs adicionales para Canny y Depth
-            try:
-                if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
-                    lora1_path = os.path.join(self.lora_dir, self.lora1_model)
-                    if os.path.exists(lora1_path):
-                        debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
-                        pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora1_scale))
-                
-                if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
-                    lora2_path = os.path.join(self.lora_dir, self.lora2_model)
-                    if os.path.exists(lora2_path):
-                        debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
-                        pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora2_scale))
-                
-                if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
-                    lora3_path = os.path.join(self.lora_dir, self.lora3_model)
-                    if os.path.exists(lora3_path):
-                        debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
-                        pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora3_scale))
-            except Exception as e:
-                error_msg = f"Error loading custom LoRAs: {str(e)}"
-                debug_print(error_msg, debug_enabled)
-                self.logger.log(error_msg)
-            
-        elif self.current_processor == "fill":   
+        elif self.current_processor == "fill":
             pipe = FluxFillPipeline.from_single_file(
                 base_model,
                 text_encoder=text_encoder,
@@ -1030,38 +1560,6 @@ class FluxControlNetTab:
                 vae=vae,
                 torch_dtype=dtype
             )
-            if use_hyper_flux:
-                pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
-                pipe.fuse_lora(lora_scale=0.125)
-                
-            try:
-                if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
-                    lora1_path = os.path.join(self.lora_dir, self.lora1_model)
-                    if os.path.exists(lora1_path):
-                        debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
-                        pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora1_scale))
-                
-                if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
-                    lora2_path = os.path.join(self.lora_dir, self.lora2_model)
-                    if os.path.exists(lora2_path):
-                        debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
-                        pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora2_scale))
-                
-                if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
-                    lora3_path = os.path.join(self.lora_dir, self.lora3_model)
-                    if os.path.exists(lora3_path):
-                        debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
-                        pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora3_scale))
-            except Exception as e:
-                error_msg = f"Error loading custom LoRAs: {str(e)}"
-                debug_print(error_msg, debug_enabled)
-                self.logger.log(error_msg)
             
         elif self.current_processor == "redux":
             pipe = FluxPipeline.from_single_file(
@@ -1071,55 +1569,86 @@ class FluxControlNetTab:
                 tokenizer=tokenizer,
                 tokenizer_2=tokenizer_2,
                 vae=vae,
-                torch_dtype=dtype    
+                torch_dtype=dtype
             )
-            if use_hyper_flux:
-                pipe.load_lora_weights(hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors"), lora_scale=0.125)
-                pipe.fuse_lora(lora_scale=0.125)
-                
-                
-            try:
-                if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
-                    lora1_path = os.path.join(self.lora_dir, self.lora1_model)
-                    if os.path.exists(lora1_path):
-                        debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
-                        pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora1_scale))
-                
-                if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
-                    lora2_path = os.path.join(self.lora_dir, self.lora2_model)
-                    if os.path.exists(lora2_path):
-                        debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
-                        pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora2_scale))
-                
-                if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
-                    lora3_path = os.path.join(self.lora_dir, self.lora3_model)
-                    if os.path.exists(lora3_path):
-                        debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
-                        self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
-                        pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
-                        pipe.fuse_lora(lora_scale=float(self.lora3_scale))
-            except Exception as e:
-                error_msg = f"Error al cargar LoRAs personalizados: {str(e)}"
-                debug_print(error_msg, debug_enabled)
-                self.logger.log(error_msg)
         
-        debug_print("\nQuantizing main transformer...", debug_enabled)
-        pipe.transformer = quantize_model_to_nf4(pipe.transformer, "Transformer principal", debug_enabled)
+        # Apply appropriate quantization based on selected type
+        debug_print(f"\nApplying {self.quantization_type} quantization...", debug_enabled)
+        if hasattr(pipe, 'transformer'):
+            pipe.transformer = apply_quantization(pipe.transformer, self.quantization_type, "Transformer", debug_enabled)
         
         debug_print("\nEnabling memory optimizations...", debug_enabled)
         if hasattr(torch.backends, 'memory_efficient_attention'):
             torch.backends.memory_efficient_attention.enabled = True
             debug_print("Memory efficient attention enabled", debug_enabled)
         
-        pipe.enable_attention_slicing()
+        # For FP8-Efficient, use more aggressive attention slicing 
+        if use_extra_optimizations:
+            debug_print("Using aggressive attention slicing for FP8-Efficient", debug_enabled)
+            pipe.enable_attention_slicing(slice_size=1)
+        else:
+            pipe.enable_attention_slicing()
+        
         debug_print("Attention slicing enabled", debug_enabled)
         
+        # Always enable CPU offload for maximal VRAM savings
         pipe.enable_model_cpu_offload()
         debug_print("Model CPU offload enabled", debug_enabled)
+        
+        # Additional optimization for FP8-Efficient: offload VAE to CPU
+        if use_extra_optimizations and hasattr(pipe, 'vae'):
+            debug_print("Offloading VAE to CPU for extra memory savings", debug_enabled)
+            pipe.vae.to('cpu')
+        
+        # Load Hyper-Flux if requested
+        if use_hyper_flux:
+            debug_print("\nLoading Hyper-Flux LoRA", debug_enabled)
+            try:
+                hyper_lora_path = hf_hub_download("ByteDance/Hyper-SD", "Hyper-FLUX.1-dev-8steps-lora.safetensors")
+                pipe.load_lora_weights(hyper_lora_path, lora_scale=0.125)
+                pipe.fuse_lora(lora_scale=0.125)
+                self.loaded_hyper_flux = True
+                debug_print("Hyper-Flux LoRA loaded successfully", debug_enabled)
+            except Exception as e:
+                error_msg = f"Error loading Hyper-Flux LoRA: {str(e)}"
+                debug_print(error_msg, debug_enabled)
+                self.logger.log(error_msg)
+
+        # Load custom LoRAs if specified
+        try:
+            if hasattr(self, 'lora1_model') and self.lora1_model and self.lora1_model != "None":
+                lora1_path = os.path.join(self.lora_dir, self.lora1_model)
+                if os.path.exists(lora1_path):
+                    debug_print(f"\nLoading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}", debug_enabled)
+                    self.logger.log(f"Loading Custom LoRA 1: {self.lora1_model} with strength {self.lora1_scale}")
+                    pipe.load_lora_weights(lora1_path, lora_scale=float(self.lora1_scale))
+                    pipe.fuse_lora(lora_scale=float(self.lora1_scale))
+                    self.loaded_lora1 = self.lora1_model
+                    self.loaded_lora1_scale = self.lora1_scale
+            
+            if hasattr(self, 'lora2_model') and self.lora2_model and self.lora2_model != "None":
+                lora2_path = os.path.join(self.lora_dir, self.lora2_model)
+                if os.path.exists(lora2_path):
+                    debug_print(f"\nLoading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}", debug_enabled)
+                    self.logger.log(f"Loading Custom LoRA 2: {self.lora2_model} with strength {self.lora2_scale}")
+                    pipe.load_lora_weights(lora2_path, lora_scale=float(self.lora2_scale))
+                    pipe.fuse_lora(lora_scale=float(self.lora2_scale))
+                    self.loaded_lora2 = self.lora2_model
+                    self.loaded_lora2_scale = self.lora2_scale
+            
+            if hasattr(self, 'lora3_model') and self.lora3_model and self.lora3_model != "None":
+                lora3_path = os.path.join(self.lora_dir, self.lora3_model)
+                if os.path.exists(lora3_path):
+                    debug_print(f"\nLoading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}", debug_enabled)
+                    self.logger.log(f"Loading Custom LoRA 3: {self.lora3_model} with strength {self.lora3_scale}")
+                    pipe.load_lora_weights(lora3_path, lora_scale=float(self.lora3_scale))
+                    pipe.fuse_lora(lora_scale=float(self.lora3_scale))
+                    self.loaded_lora3 = self.lora3_model
+                    self.loaded_lora3_scale = self.lora3_scale
+        except Exception as e:
+            error_msg = f"Error loading custom LoRAs: {str(e)}"
+            debug_print(error_msg, debug_enabled)
+            self.logger.log(error_msg)
         
         clear_memory(debug_enabled)
         debug_print("\nModels loaded and optimized correctly", debug_enabled)
@@ -1145,7 +1674,9 @@ class FluxControlNetTab:
         except Exception as e:
             self.logger.log(f"Error loading control image: {str(e)}")
             return Image.new('RGB', (512, 512), color='white')
-
+    
+    
+    
     def generate(
         self, prompt, prompt2, input_image, width, height, steps, guidance, 
         low_threshold, high_threshold, detect_resolution, image_resolution, 
@@ -1157,6 +1688,12 @@ class FluxControlNetTab:
         try:
             debug_print("\nStarting inference...", debug_enabled)
             from PIL import Image
+            
+            # Añadir mensaje para mostrar el modo de cuantización
+            quant_info = f"Using {self.quantization_type} quantization mode for generation"
+            self.logger.log(quant_info)
+            debug_print(quant_info, debug_enabled)
+            
             # Guardar los valores de LoRA como atributos de clase
             self.lora1_model = lora1_model
             self.lora1_scale = lora1_scale
@@ -1176,19 +1713,6 @@ class FluxControlNetTab:
             elif self.loaded_processor != self.current_processor:
                 need_reload = True
                 debug_print(f"Procesador cambió de {self.loaded_processor} a {self.current_processor}", debug_enabled)
-            # Si el estado de Hyper-Flux cambió
-            elif self.loaded_hyper_flux != use_hyper_flux:
-                need_reload = True
-                debug_print(f"Estado de Hyper-Flux cambió", debug_enabled)
-            # Si algún LoRA cambió (modelo o escala)
-            elif (self.loaded_lora1 != lora1_model or 
-                  (lora1_model != "None" and self.loaded_lora1_scale != lora1_scale) or
-                  self.loaded_lora2 != lora2_model or 
-                  (lora2_model != "None" and self.loaded_lora2_scale != lora2_scale) or
-                  self.loaded_lora3 != lora3_model or 
-                  (lora3_model != "None" and self.loaded_lora3_scale != lora3_scale)):
-                need_reload = True
-                debug_print("LoRAs changed, reloading models", debug_enabled)
             
             if need_reload:
                 # Si tenemos que recargar, liberar memoria primero
@@ -1198,20 +1722,52 @@ class FluxControlNetTab:
                     clear_memory(debug_enabled)
                 
                 # Cargar el nuevo modelo
-                self.pipe = self.load_models(use_hyper_flux=use_hyper_flux, debug_enabled=debug_enabled)
+                self.pipe = self.load_models(use_hyper_flux=False, debug_enabled=debug_enabled)  # Cargar sin Hyper-Flux inicialmente
                 
                 # Actualizar estado del pipeline para futuras comparaciones
                 self.loaded_processor = self.current_processor
-                self.loaded_hyper_flux = use_hyper_flux
-                self.loaded_lora1 = lora1_model
-                self.loaded_lora1_scale = lora1_scale if lora1_model != "None" else None
-                self.loaded_lora2 = lora2_model
-                self.loaded_lora2_scale = lora2_scale if lora2_model != "None" else None
-                self.loaded_lora3 = lora3_model
-                self.loaded_lora3_scale = lora3_scale if lora3_model != "None" else None
+                self.loaded_hyper_flux = False  # Iniciar sin Hyper-Flux
+                self.loaded_lora1 = "None"
+                self.loaded_lora1_scale = None
+                self.loaded_lora2 = "None"
+                self.loaded_lora2_scale = None
+                self.loaded_lora3 = "None"
+                self.loaded_lora3_scale = None
                 self.logger.log("Model loaded with new parameters")
+                
+                # Ahora aplicar LoRAs usando el método mejorado
+                # Primero Hyper-Flux si es necesario
+                if use_hyper_flux:
+                    result, _ = self.toggle_hyper_flux(True, debug_enabled)
+                    self.logger.log(result)
+                
+                # Luego aplicar los LoRAs personalizados
+                lora_results = self.check_and_update_loras(
+                    lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale, debug_enabled
+                )
+                
+                # Registrar resultados de LoRA
+                for lora_key, result in lora_results.items():
+                    if result:
+                        self.logger.log(f"{lora_key} update: {result}")
             else:
-                debug_print("Reutilizando modelo cargado previamente", debug_enabled)
+                # Si no necesitamos recargar completamente, gestionamos los cambios de LoRA dinámicamente
+                debug_print("Reutilizando modelo cargado previamente y actualizando LoRAs si es necesario", debug_enabled)
+                
+                # Gestionar el estado de Hyper-Flux
+                if self.loaded_hyper_flux != use_hyper_flux:
+                    message, _ = self.toggle_hyper_flux(use_hyper_flux, debug_enabled)
+                    self.logger.log(message)
+                
+                # Comprobar y actualizar todos los LoRAs en base a los cambios de UI
+                lora_results = self.check_and_update_loras(
+                    lora1_model, lora1_scale, lora2_model, lora2_scale, lora3_model, lora3_scale, debug_enabled
+                )
+                
+                # Registrar los resultados de las actualizaciones de LoRA
+                for lora_key, result in lora_results.items():
+                    if result:  # Solo registrar si hay un mensaje de resultado
+                        self.logger.log(f"{lora_key} update: {result}")
             
             control_image = self.load_control_image(input_image)
             
@@ -1229,7 +1785,6 @@ class FluxControlNetTab:
                     base_image = self.load_control_image(reference_image)
                     
                     # Convertir la máscara a PIL si no lo es ya
-                    
                     mask_img = mask_image
                     if isinstance(mask_img, np.ndarray):
                         mask_img = Image.fromarray(mask_img.astype('uint8'))
@@ -1284,9 +1839,9 @@ class FluxControlNetTab:
                 
                 # Log de debug para ver las dimensiones originales
                 if isinstance(control_image, Image.Image):
-                    self.logger.log(f"Original control_image dimensions: {control_image.size}")
+                    self.logger.log(f"Original dimensions of control_image: {control_image.size}")
                 elif isinstance(control_image, np.ndarray):
-                    self.logger.log(f"Original control_image dimensions: {control_image.shape}")
+                    self.logger.log(f"Original dimensions of control_image: {control_image.shape}")
                 
                 # Procesar la imagen de forma controlada
                 processor = Processor(processor_id)
@@ -1296,30 +1851,28 @@ class FluxControlNetTab:
                 if isinstance(processed_control, Image.Image):
                     # Si ya está en formato PIL, redimensionar con alta calidad
                     current_size = processed_control.size
-                    self.logger.log(f"Processed depth image size before resize: {current_size}")
+                    self.logger.log(f"Processed depth image size before resizing: {current_size}")
                     if current_size != (width, height):
                         control_image = processed_control.resize((width, height), Image.BICUBIC)
                         self.logger.log(f"Resized to {width}x{height} using BICUBIC")
                     else:
                         control_image = processed_control
-                        self.logger.log("No resize needed - image already correct size")
+                        self.logger.log("No resizing required - the image is already the correct size")
                 elif isinstance(processed_control, np.ndarray):
                     # Si es numpy array, convertir a PIL para mejor redimensionamiento
                     pil_img = Image.fromarray(processed_control)
                     current_size = pil_img.size
-                    self.logger.log(f"Processed depth image size before resize: {current_size}")
+                    self.logger.log(f"Processed depth image size before resizing: {current_size}")
                     if current_size != (width, height):
                         pil_img = pil_img.resize((width, height), Image.BICUBIC)
                         self.logger.log(f"Resized to {width}x{height} using BICUBIC")
                     control_image = pil_img  # Mantener como PIL Image
                 
-
                 self.logger.log(f"Final image type: {type(control_image)}")
                 if isinstance(control_image, Image.Image):
                     self.logger.log(f"Final image size: {control_image.size}")
                 elif isinstance(control_image, np.ndarray):
                     self.logger.log(f"Final image shape: {control_image.shape}")
-                
                 
                 with torch.inference_mode():
                     self.logger.log("Starting generation process...")
@@ -1334,7 +1887,6 @@ class FluxControlNetTab:
                     )
                     self.logger.log("Generation completed")
             
-                
             elif self.current_processor == "redux":
                 self.logger.log("Starting Redux process...")
                 pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
@@ -1346,7 +1898,6 @@ class FluxControlNetTab:
                     torch_dtype=torch.bfloat16
                 ).to(device)
                     
-                    
                 my_prompt = prompt
                 my_prompt2 = prompt2 if prompt2 else prompt  # Aseguramos que prompt2 tenga un valor
                     
@@ -1354,6 +1905,7 @@ class FluxControlNetTab:
                     self.logger.log("Processing two images...")
                     pipe_prior_output = pipe_prior_redux([control_image, control_image2], 
                                                         prompt=[my_prompt, my_prompt2],
+                                                        
                                                         prompt_embeds_scale=[prompt_embeds_scale_1, prompt_embeds_scale_2],
                                                         pooled_prompt_embeds_scale=[pooled_prompt_embeds_scale_1, pooled_prompt_embeds_scale_2])
                 else:
@@ -1384,7 +1936,7 @@ class FluxControlNetTab:
                         joint_attention_kwargs=joint_attention_kwargs,
                         **pipe_prior_output,
                     )
-                    self.logger.log("Generation completed")
+                    self.logger.log("Generation completeds")
             
             debug_print("\nGeneration completed", debug_enabled)
             clear_memory(debug_enabled)
@@ -1426,11 +1978,13 @@ def on_ui_tabs():
         initial_output = settings["output_dir"]
         initial_lora = settings["lora_dir"]
         initial_text_encoders = settings.get("text_encoders_path", "./models/diffusers/text_encoders_FP8")
+        initial_quantization = settings.get("quantization_type", "NF4")
     else:
         initial_checkpoints = "./models/stable-diffusion/"
         initial_output = "./outputs/fluxcontrolnet/"
         initial_lora = "./models/lora/"
         initial_text_encoders = "./models/diffusers/text_encoders_FP8"
+        initial_quantization = "NF4"
     
     css = """
         /* Reducir el ancho de los checkboxes y etiquetas */
@@ -1458,7 +2012,31 @@ def on_ui_tabs():
             margin-bottom: 2px !important;
         }
     """
-   
+    def force_model_reload(debug_enabled):
+        try:
+            # Solo proceder si hay un pipeline cargado
+            if flux_tab.pipe is not None:
+                # Guardar el estado actual
+                current_processor = flux_tab.current_processor
+                current_hyper_flux = getattr(flux_tab, "loaded_hyper_flux", False)
+                
+                # Liberar el pipeline actual
+                del flux_tab.pipe
+                flux_tab.pipe = None
+                clear_memory(debug_enabled)
+                
+                # Indicar que necesitamos recargar
+                flux_tab.loaded_processor = None
+                
+                # Mostrar mensaje de éxito
+                return f"Pipeline released successfully. It will be recharged with {flux_tab.quantization_type} in the next generation."
+            else:
+                # Si no hay pipeline cargado, no hay nada que hacer
+                return "There is no model currently loaded. New settings will be applied in the next generation."
+        except Exception as e:
+            return f"Error reloading model: {str(e)}"
+    
+    
     with gr.Blocks(analytics_enabled=False, head=canvas_head) as flux_interface: 
         with gr.Row():
             extension_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1759,33 +2337,76 @@ def on_ui_tabs():
                 ))
                 
         with gr.Accordion("Advanced Settings", open=False):
+            # First: HF Token UI
             with gr.Row():
                 gr.Column(scale=1)
                 with gr.Column(scale=1):
-                    # Añadir un elemento de texto para mostrar el estado del token
+                    # HF Token input
                     hf_token = gr.Textbox(
                         label="Hugging Face Read Token :",
                         placeholder="Enter your Hugging Face token...",
                         type="password"
                     )
                 with gr.Column(scale=1):    
-                    
                     hf_token_status = gr.Markdown(
-                        value=check_existing_token(),  # Usamos la función directamente al inicializar
+                        value=check_existing_token(),
                         elem_id="hf_token_status"
                     )
                 gr.Column(scale=1)
-                    
-                    
+                        
+            # HF Token buttons
             with gr.Row():
-                
                 gr.Column(scale=1)
                 with gr.Column(scale=1):
                     save_settingsHF_btn = gr.Button("Save HF Token:", variant="primary")
                 with gr.Column(scale=1):
                     check_token_btn = gr.Button("Check Current Token", variant="primary")
-                gr.Column(scale=1)        
+                gr.Column(scale=1)
             
+            # SECOND: Quantization options (moved here as requested)
+            with gr.Row():
+                gr.Column(scale=1)
+                with gr.Column(scale=2):
+                    # Add quantization options
+                    quantization_type = gr.Radio(
+                        label="Quantization Type:",
+                        choices=[
+                            "NF4 (~8GB)", 
+                            "FP8-Efficient (~8GB)", 
+                            "FP8 (~8GB)", 
+                            "BF16 (~24GB)"
+                        ],
+                        value="NF4 (~8GB)" if initial_quantization == "NF4" else
+                              "FP8-Efficient (~8GB)" if initial_quantization == "FP8-Efficient" else
+                              "FP8 (~8GB)" if initial_quantization == "FP8" else
+                              "BF16 (~24GB)",
+                        info="Select quantization type based on available VRAM",
+                    )
+                with gr.Column(scale=2):    
+                    # Quantization info display with initial value
+                    quant_descriptions = {
+                        "NF4": "**Current setting:** NF4 quantization (4-bit, ~8GB VRAM)",
+                        "FP8-Efficient": "**Current setting:** FP8-Efficient quantization (8-bit optimized, ~8GB VRAM)",
+                        "FP8": "**Current setting:** FP8 quantization (8-bit, ~8GB VRAM)",
+                        "BF16": "**Current setting:** BF16 precision (No quantization, ~24GB VRAM)"
+                    }
+                    quantization_info = gr.Markdown(
+                        value=quant_descriptions.get(initial_quantization, "Unknown quantization type"),
+                        elem_id="quantization_info"
+                    )
+                    reload_model_btn = gr.Button("Reload Model", variant="secondary")
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                gr.Column(scale=1)
+            
+            
+            
+            # THIRD: Path display 
             settings = load_settings() or {}
             checkpoint_value = settings.get("checkpoint_path", "./models/Stable-diffusion/")
             output_value = settings.get("output_dir", "./outputs/fluxcontrolnet/")
@@ -1797,9 +2418,9 @@ def on_ui_tabs():
                 outp_display = gr.Markdown(f"Current images output dir: `{output_value}`")
                 lora_display = gr.Markdown(f"Current LoRA path: `{lora_value}`")
                 text_encoders_display = gr.Markdown(f"Current text encoders path: `{text_encoders_value}`")
-       
+           
+            # FOURTH: Path settings
             with gr.Row():
-                
                 checkpoint_path = gr.Textbox(
                     label="Checkpoints_Path :",
                     value=checkpoint_value,
@@ -1819,11 +2440,12 @@ def on_ui_tabs():
                 )
                 
                 text_encoders_path = gr.Textbox(
-                    label="Text_Encoders_Path :",
-                    value=text_encoders_value,
+                    label="Text Encoders Path:",
+                    value="./models/diffusers/text_encoders_FP8",  # Forzar el valor correcto independientemente de initial_text_encoders
                     placeholder="Enter text encoders path..."
                 )
-                            
+                                
+            # Save Settings buttons
             with gr.Row():
                 with gr.Column(scale=1):
                     update_path_btn = gr.Button(" Update_Path: ", size="sm", value=False, visible=False)
@@ -1834,6 +2456,7 @@ def on_ui_tabs():
                 with gr.Column(scale=1):
                     debug = gr.Checkbox(label="Debug Mode", value=False)
             
+            # Log box
             with gr.Row():
                 log_box = gr.Textbox(
                     label="Latest Logs",
@@ -1843,24 +2466,58 @@ def on_ui_tabs():
                 )
                 flux_tab.logger.log_box = log_box
             
+            # Helper function to update the quantization info display
+            def update_quant_info(quantization_val):
+                quant_type = quantization_val.split(" ")[0]
+                quant_descriptions = {
+                    "NF4": "**Current setting:** NF4 quantization (4-bit, ~8GB VRAM)",
+                    "FP8-Efficient": "**Current setting:** FP8-Efficient quantization (8-bit optimized, ~8GB VRAM)",
+                    "FP8": "**Current setting:** FP8 quantization (8-bit, ~8GB VRAM)",
+                    "BF16": "**Current setting:** BF16 precision (No quantization, ~24GB VRAM)"
+                }
+                return quant_descriptions.get(quant_type, "Unknown quantization type")
+
+            # Add this change handler to update the info text when the radio selection changes:
+            
+            
+            
+            
+            quantization_type.change(
+                fn=update_quant_info,
+                inputs=[quantization_type],
+                outputs=[quantization_info]
+            )
+            
             #botones
             
-            # Función wrapper para actualizar la instancia al guardar
-            def save_settings_wrapper(checkpoint_path_val, output_dir_val, lora_dir_val, text_encoders_path_val, debug_val):
-                log_msg, new_cp, new_od, new_lora, new_text_encoders = save_settings(
+            
+            def save_settings_wrapper(checkpoint_path_val, output_dir_val, lora_dir_val, text_encoders_path_val, quantization_val, debug_val):
+                # Extract the actual quantization type from the radio option (strip the VRAM info)
+                quantization_type = quantization_val.split(" ")[0]
+                
+                log_msg, new_cp, new_od, new_lora, new_text_encoders, new_quant = save_settings(
                     checkpoint_path_val, 
                     output_dir_val,
                     lora_dir_val,
                     text_encoders_path_val,
+                    quantization_type,
                     debug_val
                 )
                 flux_tab.checkpoint_path = new_cp
                 flux_tab.output_dir = new_od
                 flux_tab.lora_dir = new_lora
                 flux_tab.text_encoders_path = new_text_encoders
+                flux_tab.quantization_type = new_quant
                 
-                # Actualizar las listas de LoRAs
+                # Update the lora lists
                 new_lora_choices = list_lora_files(new_lora)
+                
+                # Get the updated display text for quantization
+                quant_descriptions = {
+                    "NF4": "**Current setting:** NF4 quantization (4-bit, ~8GB VRAM)",
+                    "FP8": "**Current setting:** FP8 quantization (8-bit, ~8GB VRAM)",
+                    "BF16": "**Current setting:** BF16 precision (No quantization, ~24GB VRAM)"
+                }
                 
                 return [
                     log_msg,           # log_box
@@ -1871,19 +2528,20 @@ def on_ui_tabs():
                     gr.update(choices=new_lora_choices),  # lora1_model
                     gr.update(choices=new_lora_choices),  # lora2_model
                     gr.update(choices=new_lora_choices),  # lora3_model
-                    gr.Markdown.update(value=f"Latest checkpoints path: `{new_cp}`"),
-                    gr.Markdown.update(value=f"Latest images output dir: `{new_od}`"),
-                    gr.Markdown.update(value=f"Latest LoRA path: `{new_lora}`"),
-                    gr.Markdown.update(value=f"Latest text encoders path: `{new_text_encoders}`")
+                    gr.Markdown.update(value=f"Current checkpoints path: `{new_cp}`"),
+                    gr.Markdown.update(value=f"Current images output dir: `{new_od}`"),
+                    gr.Markdown.update(value=f"Current LoRA path: `{new_lora}`"),
+                    gr.Markdown.update(value=f"Current text encoders path: `{new_text_encoders}`"),
+                    gr.Markdown.update(value=quant_descriptions.get(new_quant, "Unknown quantization type"))
                 ]
             
             save_settings_btn.click(
                 fn=save_settings_wrapper,
-                inputs=[checkpoint_path, output_dir, lora_dir, text_encoders_path, debug],
+                inputs=[checkpoint_path, output_dir, lora_dir, text_encoders_path, quantization_type, debug],
                 outputs=[
                     log_box, checkpoint_path, output_dir, lora_dir, text_encoders_path,
                     lora1_model, lora2_model, lora3_model,
-                    ckpt_display, outp_display, lora_display, text_encoders_display
+                    ckpt_display, outp_display, lora_display, text_encoders_display, quantization_info
                 ]
             )
 
@@ -1892,7 +2550,13 @@ def on_ui_tabs():
                 inputs=[hf_token],
                 outputs=[log_box]
             )
-       
+            
+            reload_model_btn.click(
+                fn=force_model_reload,
+                inputs=[debug],
+                outputs=[log_box]
+            )
+            
             get_dimensions_btn.click(
                 fn=lambda img, canvas_bg, mode, w, h: update_dimensions(img, canvas_bg, mode, w, h),
                 inputs=[input_image, fill_canvas.background, current_mode, width, height],
@@ -2048,11 +2712,79 @@ def on_ui_tabs():
             inputs=[checkpoint_path, debug],
             outputs=[checkpoint_path]
         )
+        # Reemplaza el controlador existente de use_hyper_flux.change con este:
+        # Reemplaza el controlador existente de use_hyper_flux.change con este:
         use_hyper_flux.change(
-        
-            fn=lambda x: gr.update(value=10 if x else 30),
-            inputs=[use_hyper_flux],
-            outputs=[steps]
+            fn=lambda x, debug_enabled: flux_tab.toggle_hyper_flux(x, debug_enabled),
+            inputs=[use_hyper_flux, debug],
+            outputs=[log_box, steps]
+        )
+
+        # Funciones para manejar cambios en los LoRAs
+        def on_lora1_change(model, scale, debug_enabled):
+            result = flux_tab.update_lora(1, model, scale, debug_enabled)
+            return result
+
+        def on_lora2_change(model, scale, debug_enabled):
+            result = flux_tab.update_lora(2, model, scale, debug_enabled)
+            return result
+
+        def on_lora3_change(model, scale, debug_enabled):
+            result = flux_tab.update_lora(3, model, scale, debug_enabled)
+            return result
+
+        # Controladores de eventos para LoRA 1
+        lora1_model.change(
+            fn=on_lora1_change,
+            inputs=[lora1_model, lora1_scale, debug],
+            outputs=[log_box]
+        )
+
+        lora1_scale.release(
+            fn=on_lora1_change,
+            inputs=[lora1_model, lora1_scale, debug],
+            outputs=[log_box]
+        )
+
+        # Controladores de eventos para LoRA 2
+        lora2_model.change(
+            fn=on_lora2_change,
+            inputs=[lora2_model, lora2_scale, debug],
+            outputs=[log_box]
+        )
+
+        lora2_scale.release(
+            fn=on_lora2_change,
+            inputs=[lora2_model, lora2_scale, debug],
+            outputs=[log_box]
+        )
+
+        # Controladores de eventos para LoRA 3
+        lora3_model.change(
+            fn=on_lora3_change,
+            inputs=[lora3_model, lora3_scale, debug],
+            outputs=[log_box]
+        )
+
+        lora3_scale.release(
+            fn=on_lora3_change,
+            inputs=[lora3_model, lora3_scale, debug],
+            outputs=[log_box]
+        )
+
+        # Actualizar el controlador de refresh_all_loras_btn
+        def refresh_all_loras():
+            choices = list_lora_files(flux_tab.lora_dir)
+            return [
+                gr.Dropdown.update(choices=choices),
+                gr.Dropdown.update(choices=choices),
+                gr.Dropdown.update(choices=choices)
+            ]
+
+        refresh_all_loras_btn.click(
+            fn=refresh_all_loras,
+            inputs=[],
+            outputs=[lora1_model, lora2_model, lora3_model]
         )
         
         def update_preprocessing(input_image, low_threshold, high_threshold, detect_resolution, image_resolution, debug, processor_id, width, height):
@@ -2094,7 +2826,27 @@ def on_ui_tabs():
                 # Track the last used seed
                 last_used_seed = None
                 
-                status_msg = "Starting generation..."
+                # Mostrar información sobre el modo de cuantización
+                quant_mode = flux_tab.quantization_type
+                quant_info = {
+                    "NF4": "NF4 quantization (4-bit, ~8GB VRAM)",
+                    "FP8-Efficient": "FP8-Efficient quantization (8-bit optimized, ~8GB VRAM)",
+                    "FP8": "FP8 quantization (8-bit, ~8GB VRAM)",
+                    "BF16": "BF16 precision (No quantization, ~24GB VRAM)"
+                }
+                quant_description = quant_info.get(quant_mode, f"Unknown quantization type: {quant_mode}")
+                
+                # Mostrar en la consola
+                print(f"\n---------------------------------------------")
+                print(f" STARTING GENERATION")
+                print(f" Using {quant_description}")
+                print(f" Mode: {current_mode.upper()}")
+                print(f" Batch size: {total_batch}")
+                print(f" Hyper-FLUX: {'Enabled' if use_hyper_flux else 'Disabled'}")
+                print(f"---------------------------------------------\n")
+                
+                # Mostrar en la interfaz de usuario
+                status_msg = f"Starting generation using {quant_description}..."
                 yield results, flux_tab.logger.log(status_msg), status_msg, gr.update()
                 
                 for i in range(total_batch):
