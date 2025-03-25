@@ -53,7 +53,7 @@ https://youtu.be/iNG5CpOiwXo?si=r23QVgHy0GZHUe9j&t=305
 >   (https://huggingface.co/Academia-SD/flux1-Fill-Dev-FP8/tree/main)
 >
 > - Text encoders FP8
->   (https://huggingface.co/Academia-SD/flux1-dev-text-encoders/blob/main/text_encoders_FP8.zip) Unzip into models/diffusers
+>   (https://huggingface.co/Academia-SD/flux1-dev-text_encoders-NF4/resolve/main/text_encoders_FP8.zip?download=true) Unzip into models/diffusers
 >   
 >   Alternative download (https://drive.google.com/file/d/1UwDD0bf2Y0upsFI9ZARNpvBUtL22Qxg3/view?usp=drive_link) 
     
